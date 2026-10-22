@@ -1,4 +1,4 @@
-import { useState, useEffect, useRef } from "react";
+import { useState, useEffect, useRef, useCallback } from "react";
 import { importCsv, previewCsv, getTables, deleteTable } from "../api";
 
 /**
@@ -7,7 +7,7 @@ import { importCsv, previewCsv, getTables, deleteTable } from "../api";
  * 流程: 选择文件 → 预览解析结果 → 调整列名/类型/主键 → 确认导入
  */
 
-const TYPE_OPTIONS = ["INT", "DECIMAL(10,2)", "DATE", "TIMESTAMP", "VARCHAR(100)", "VARCHAR(200)", "VARCHAR(500)"];
+const TYPE_OPTIONS = ["INT", "BIGINT", "DECIMAL(18,2)", "DATE", "TIMESTAMP", "VARCHAR(100)", "VARCHAR(500)", "TEXT"];
 
 function formatTime(dateStr) {
   if (!dateStr) return "";
@@ -21,7 +21,7 @@ function formatNumber(n) { return typeof n === "number" ? n.toLocaleString("zh-C
 // ═══════════════════════════════════════════════════════════════
 
 function CsvPreviewModal({ preview, file, onConfirm, onCancel, onRefresh, importing }) {
-  // 用 useEffect 响应 preview 数据变化（行号切换后重新预览）
+  // 父组件在每次重新预览时更换 key，组件重新挂载即可用新的 preview 初始化状态
   const [columnConfig, setColumnConfig] = useState(() =>
     preview.columns.map((c) => ({ name: c.name, type: c.detected_type }))
   );
@@ -31,17 +31,6 @@ function CsvPreviewModal({ preview, file, onConfirm, onCancel, onRefresh, import
   const [dataStartRow, setDataStartRow] = useState(preview.data_start_row || 2);
   const [combineHeaders, setCombineHeaders] = useState(preview.combine_header_rows || 1);
   const [skipTrailing, setSkipTrailing] = useState(preview.skip_trailing_rows || 0);
-
-  // 当 preview 数据刷新时，同步更新状态
-  useEffect(() => {
-    setColumnConfig(preview.columns.map((c) => ({ name: c.name, type: c.detected_type })));
-    setPrimaryKey(preview.file_profile?.recommended_primary_key || "");
-    setTableAlias(preview.file_profile?.suggested_table_name || "");
-    setHeaderRow(preview.header_row || 1);
-    setDataStartRow(preview.data_start_row || 2);
-    setCombineHeaders(preview.combine_header_rows || 1);
-    setSkipTrailing(preview.skip_trailing_rows || 0);
-  }, [preview]);
 
   const handleNameChange = (idx, newName) => {
     setColumnConfig((prev) => {
@@ -157,10 +146,14 @@ function CsvPreviewModal({ preview, file, onConfirm, onCancel, onRefresh, import
                     onChange={(e) => handleTypeChange(idx, e.target.value)}
                     title="修改数据类型"
                   >
+                    {!TYPE_OPTIONS.includes(preview.columns[idx].detected_type) && (
+                      <option value={preview.columns[idx].detected_type}>
+                        {preview.columns[idx].detected_type}（自动识别）
+                      </option>
+                    )}
                     {TYPE_OPTIONS.map((t) => (
                       <option key={t} value={t}>{t}</option>
                     ))}
-                    <option value={col.type} disabled>───</option>
                   </select>
                 </div>
                 <div className="col-samples">
@@ -354,14 +347,16 @@ export default function CsvUploader({ onImportComplete, onQueryTable, onAnalyzeT
   const [pendingConfig, setPendingConfig] = useState(null);
   const [importedTables, setImportedTables] = useState([]);
   const [preview, setPreview] = useState(null);
+  const [previewSeq, setPreviewSeq] = useState(0);
   const [previewFile, setPreviewFile] = useState(null);
   const fileInputRef = useRef(null);
 
-  const loadTables = async () => {
-    try { const data = await getTables({ importedOnly: true }); setImportedTables(data.tables || []); }
-    catch { /* silent */ }
-  };
-  useEffect(() => { loadTables(); }, []);
+  const loadTables = useCallback(() => {
+    getTables({ importedOnly: true })
+      .then((data) => setImportedTables(data.tables || []))
+      .catch(() => { /* 后端未就绪时静默 */ });
+  }, []);
+  useEffect(() => { loadTables(); }, [loadTables]);
 
   // ── 文件选择 → 先预览 ──
   const handleFilePicked = async (file, hr, dsr, ch, st) => {
@@ -378,6 +373,7 @@ export default function CsvUploader({ onImportComplete, onQueryTable, onAnalyzeT
       if (st !== undefined) opts.skipTrailing = st;
       const data = await previewCsv(file, opts);
       setPreview(data);
+      setPreviewSeq((n) => n + 1);
     } catch (err) {
       const detail = err.response?.data?.detail;
       setError(typeof detail === "string" ? detail : (detail?.message || "预览失败"));
@@ -442,8 +438,12 @@ export default function CsvUploader({ onImportComplete, onQueryTable, onAnalyzeT
     if (pendingFile) doImport(pendingFile, { ...(pendingConfig || {}), overwrite: true });
   };
   const handleRename = (customName) => {
+    const baseName = conflict?.table_name || "csv_imported";
+    // 未填写新名称时自动追加时间戳后缀，避免以同名再次提交导致反复冲突
+    const stamp = new Date().toISOString().replace(/\D/g, "").slice(4, 14);
+    const tableName = customName?.trim() || `${baseName}_${stamp}`;
     setConflict(null);
-    if (pendingFile) doImport(pendingFile, { ...(pendingConfig || {}), tableName: customName, overwrite: false });
+    if (pendingFile) doImport(pendingFile, { ...(pendingConfig || {}), tableName, overwrite: false });
   };
   const handleCancelConflict = () => { setConflict(null); setPendingFile(null); setPendingConfig(null); };
   const handlePreviewCancel = () => { setPreview(null); setPreviewFile(null); };
@@ -452,7 +452,10 @@ export default function CsvUploader({ onImportComplete, onQueryTable, onAnalyzeT
     if (!confirm(`确定要删除表 "${tableName}" 吗？此操作不可撤销。`)) return;
     setDeleting(true); setError(null);
     try { await deleteTable(tableName); loadTables(); if (onImportComplete) onImportComplete(); }
-    catch (err) { setError(err.response?.data?.detail || "删除失败"); }
+    catch (err) {
+      const detail = err.response?.data?.detail;
+      setError(typeof detail === "string" ? detail : "删除失败");
+    }
     finally { setDeleting(false); }
   };
 
@@ -547,6 +550,7 @@ export default function CsvUploader({ onImportComplete, onQueryTable, onAnalyzeT
       {/* 预览弹窗 */}
       {preview && (
         <CsvPreviewModal
+          key={previewSeq}
           preview={preview}
           file={previewFile}
           onConfirm={handlePreviewConfirm}

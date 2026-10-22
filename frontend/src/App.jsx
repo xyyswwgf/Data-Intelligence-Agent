@@ -11,6 +11,7 @@ import {
   analyzeTableQuestion,
   getAnalysisHistory,
   getAnalysisDetail,
+  analysisExportUrl,
   apiClient,
 } from "./api";
 import "./App.css";
@@ -90,9 +91,11 @@ function MetricGrid({ metrics }) {
         <div className="metric-card" key={metric.name}>
           <span className="metric-name">{metric.name}</span>
           <strong>{formatMetric(metric.current, metric.name)}</strong>
-          <small className={metric.change >= 0 ? "metric-up" : "metric-down"}>
-            环比 {formatPercent(metric.change_rate)}
-          </small>
+          {metric.change_rate !== null && metric.change_rate !== undefined && (
+            <small className={metric.change >= 0 ? "metric-up" : "metric-down"}>
+              {metric.comparison || "环比"} {formatPercent(metric.change_rate, true)}
+            </small>
+          )}
         </div>
       ))}
     </section>
@@ -105,8 +108,8 @@ function AgentSteps({ steps }) {
     <section className="agent-panel">
       <h3>Agent 执行步骤</h3>
       <div className="step-timeline">
-        {steps.map((step) => (
-          <div className="step-item" key={step.name}>
+        {steps.map((step, index) => (
+          <div className="step-item" key={`${step.name}-${index}`}>
             <span className={`step-dot ${step.status}`} />
             <div>
               <strong>{step.name}</strong>
@@ -124,8 +127,8 @@ function AgentCharts({ charts }) {
   if (!charts?.length) return null;
   return (
     <section className="agent-charts">
-      {charts.map((chart) => (
-        <div className="agent-chart" key={chart.title}>
+      {charts.map((chart, index) => (
+        <div className="agent-chart" key={`${chart.title}-${index}`}>
           <h3>{chart.title}</h3>
           <ReactECharts
             option={chart.echarts_option}
@@ -139,49 +142,95 @@ function AgentCharts({ charts }) {
   );
 }
 
+// 对比型归因（上期 / 本期 / 变化）
+const COMPARE_SECTIONS = [
+  { key: "region", title: "地区 GMV 归因", label: "省份", value: "change" },
+  { key: "category", title: "品类 GMV 归因", label: "品类", value: "change" },
+  { key: "refund", title: "退款率排行", label: "品类", value: "current", percent: true },
+  { key: "roi", title: "渠道 ROI 变化", label: "渠道", value: "change" },
+  { key: "conversion_region", title: "转化率变化", label: "渠道", value: "change", percent: true },
+  { key: "trend", title: "周期环比变化", label: "周期", value: "change" },
+];
+
+// 明细型结果（CSV 通用 Agent），直接按行列展示
+const TABLE_SECTIONS = {
+  group_compare: "分组对比",
+  missing: "字段缺失",
+  anomaly: "异常值候选",
+};
+
+function CompareCard({ section, rows, focusRegion }) {
+  const title = section.key === "conversion_region" && focusRegion ? `${focusRegion}${section.title}` : section.title;
+  return (
+    <div className="attribution-card">
+      <h3>{title}</h3>
+      <table>
+        <thead>
+          <tr>
+            <th>{section.label}</th>
+            <th>上期</th>
+            <th>本期</th>
+            <th>{section.value === "current" ? "当前值" : "变化"}</th>
+          </tr>
+        </thead>
+        <tbody>
+          {rows.slice(0, 5).map((row, index) => (
+            <tr key={`${row[section.label]}-${index}`}>
+              <td>{row[section.label]}</td>
+              <td>{section.percent ? formatPercent(row.previous) : formatMetric(row.previous)}</td>
+              <td>{section.percent ? formatPercent(row.current) : formatMetric(row.current)}</td>
+              <td className={Number(row[section.value]) >= 0 ? "metric-up" : "metric-down"}>
+                {section.percent ? formatPercent(row[section.value]) : formatMetric(row[section.value])}
+              </td>
+            </tr>
+          ))}
+        </tbody>
+      </table>
+    </div>
+  );
+}
+
+function RowsCard({ title, rows }) {
+  const columns = Object.keys(rows[0]);
+  return (
+    <div className="attribution-card">
+      <h3>{title}</h3>
+      <table>
+        <thead>
+          <tr>{columns.map((col) => <th key={col}>{col}</th>)}</tr>
+        </thead>
+        <tbody>
+          {rows.slice(0, 10).map((row, index) => (
+            <tr key={index}>
+              {columns.map((col) => (
+                <td key={col}>{col.includes("率") ? formatPercent(row[col]) : formatCell(row[col])}</td>
+              ))}
+            </tr>
+          ))}
+        </tbody>
+      </table>
+    </div>
+  );
+}
+
 function AttributionPanel({ attribution }) {
   if (!attribution || Object.keys(attribution).length === 0) return null;
-  const sections = [
-    { key: "region", title: "地区 GMV 归因", label: "省份", value: "change" },
-    { key: "category", title: "品类 GMV 归因", label: "品类", value: "change" },
-    { key: "refund", title: "退款率异常", label: "品类", value: "current", percent: true },
-    { key: "roi", title: "渠道 ROI 变化", label: "渠道", value: "change" },
-    { key: "conversion_north", title: "华北转化率变化", label: "渠道", value: "change", percent: true },
-  ];
-
+  const compareCards = COMPARE_SECTIONS.filter((section) => attribution[section.key]?.length).map((section) => (
+    <CompareCard
+      key={section.key}
+      section={section}
+      rows={attribution[section.key]}
+      focusRegion={attribution.focus_region}
+    />
+  ));
+  const tableCards = Object.entries(TABLE_SECTIONS)
+    .filter(([key]) => attribution[key]?.length)
+    .map(([key, title]) => <RowsCard key={key} title={title} rows={attribution[key]} />);
+  if (!compareCards.length && !tableCards.length) return null;
   return (
     <section className="attribution-grid">
-      {sections.map((section) => {
-        const rows = attribution[section.key] || [];
-        if (!rows.length) return null;
-        return (
-          <div className="attribution-card" key={section.key}>
-            <h3>{section.title}</h3>
-            <table>
-              <thead>
-                <tr>
-                  <th>{section.label}</th>
-                  <th>上期</th>
-                  <th>本期</th>
-                  <th>{section.value === "current" ? "当前值" : "变化"}</th>
-                </tr>
-              </thead>
-              <tbody>
-                {rows.slice(0, 5).map((row) => (
-                  <tr key={row[section.label]}>
-                    <td>{row[section.label]}</td>
-                    <td>{section.percent ? formatPercent(row.previous) : formatMetric(row.previous)}</td>
-                    <td>{section.percent ? formatPercent(row.current) : formatMetric(row.current)}</td>
-                    <td className={Number(row[section.value]) >= 0 ? "metric-up" : "metric-down"}>
-                      {section.percent ? formatPercent(row[section.value]) : formatMetric(row[section.value])}
-                    </td>
-                  </tr>
-                ))}
-              </tbody>
-            </table>
-          </div>
-        );
-      })}
+      {compareCards}
+      {tableCards}
     </section>
   );
 }
@@ -194,8 +243,8 @@ function AgentReport({ report, knowledge, runId }) {
         <h3>分析报告</h3>
         {runId && (
           <div className="report-actions">
-            <a href={`/api/analysis/${runId}/export?format=markdown`}>导出 MD</a>
-            <a href={`/api/analysis/${runId}/export?format=html`}>导出 HTML</a>
+            <a href={analysisExportUrl(runId, "markdown")}>导出 MD</a>
+            <a href={analysisExportUrl(runId, "html")}>导出 HTML</a>
           </div>
         )}
       </div>
@@ -238,9 +287,11 @@ function SqlTrace({ queries }) {
     <section className="agent-panel">
       <h3>SQL 执行记录</h3>
       <div className="sql-trace-list">
-        {queries.map((query) => (
-          <details key={query.id} className="sql-details">
-            <summary>{query.purpose} · {query.row_count} 行</summary>
+        {queries.map((query, index) => (
+          <details key={`${query.id}-${index}`} className="sql-details">
+            <summary>
+              {query.purpose} · {query.row_count} 行{query.truncated ? "（已截断）" : ""}
+            </summary>
             <pre className="sql-code">{query.sql}</pre>
           </details>
         ))}
@@ -249,10 +300,23 @@ function SqlTrace({ queries }) {
   );
 }
 
+function AgentErrors({ errors }) {
+  if (!errors?.length) return null;
+  return (
+    <div className="error-banner">
+      <span className="error-icon">⚠️</span>
+      <span>
+        分析未完成：{errors.map((e) => `[${e.node}] ${e.message}`).join("；")}
+      </span>
+    </div>
+  );
+}
+
 function AgentResult({ result }) {
   if (!result) return null;
   return (
     <div className="agent-result">
+      <AgentErrors errors={result.errors} />
       <MetricGrid metrics={result.metrics} />
       <AgentSteps steps={result.steps} />
       <AgentCharts charts={result.charts} />
@@ -280,6 +344,7 @@ function AnalysisHistory({ items, activeRunId, onSelect }) {
             onClick={() => onSelect(item.run_id)}
           >
             <strong>{item.question}</strong>
+            {item.table_name && <code className="history-table">{item.table_name}</code>}
             <small>{item.summary || item.status}</small>
           </button>
         ))}
@@ -288,17 +353,27 @@ function AnalysisHistory({ items, activeRunId, onSelect }) {
   );
 }
 
-function formatPercent(value) {
-  const num = Number(value || 0);
-  return `${(num * 100).toFixed(2)}%`;
+function formatPercent(value, signed = false) {
+  if (value === null || value === undefined || value === "") return "—";
+  const num = Number(value);
+  if (!Number.isFinite(num)) return "—";
+  const sign = signed && num > 0 ? "+" : "";
+  return `${sign}${(num * 100).toFixed(2)}%`;
 }
 
 function formatMetric(value, name) {
-  const num = Number(value || 0);
-  if (name?.includes("率")) return formatPercent(num);
+  if (value === null || value === undefined || value === "") return "—";
+  if (name?.includes("率")) return formatPercent(value);
+  const num = Number(value);
+  if (!Number.isFinite(num)) return String(value);
   return num.toLocaleString("zh-CN", {
     maximumFractionDigits: 2,
   });
+}
+
+function formatCell(value) {
+  if (value === null || value === undefined) return "—";
+  return typeof value === "number" ? formatMetric(value) : String(value);
 }
 
 // ── 主 App ──
@@ -332,9 +407,10 @@ function App() {
   }, []);
 
   useEffect(() => {
-    fetchInfo();
-    fetchHistory();
-  }, [fetchInfo, fetchHistory]);
+    // setState 只在 Promise 回调中执行，避免在 effect 中同步触发级联渲染
+    apiClient.get("/api/info").then((res) => setSourceInfo(res.data)).catch(() => {});
+    getAnalysisHistory().then((res) => setHistoryItems(res.items || [])).catch(() => {});
+  }, []);
 
   const handleQuery = async (question, forcedMode = null) => {
     const activeMode = forcedMode || mode;
@@ -373,7 +449,7 @@ function App() {
   const handleQueryTable = (tableName) => {
     setTargetTable(null);
     setMode("query");
-    handleQuery(`查看 ${tableName} 表的所有数据`, "query");
+    handleQuery(`查看 ${tableName} 表的前 100 行数据`, "query");
   };
 
   const handleAnalyzeTable = (tableName) => {
@@ -397,6 +473,8 @@ function App() {
     setMode("agent");
     try {
       const data = await getAnalysisDetail(runId);
+      // 回看 CSV 表的分析时，同步切到该表，后续追问仍针对同一张表
+      setTargetTable(data.table_name || null);
       setAgentResult(data);
     } catch (err) {
       setError(extractErrorMessage(err));
@@ -478,17 +556,19 @@ function App() {
       {/* 查询结果 */}
       {result && (
         <div className="result-container">
-          {result.columns.length > 0 && result.data.length > 0 && (
-            <ResultChart
-              columns={result.columns}
-              data={result.data}
-              chartConfig={result.chartConfig}
-            />
+          {result.attempts > 1 && (
+            <div className="demo-note">首次生成的 SQL 执行报错，已根据数据库错误自动修正（共 {result.attempts} 次）。</div>
           )}
+          <ResultChart
+            columns={result.columns}
+            data={result.data}
+            chartConfig={result.chartConfig}
+          />
           <ResultTable
             columns={result.columns}
             data={result.data}
             sql={result.sql}
+            truncated={result.truncated}
           />
         </div>
       )}

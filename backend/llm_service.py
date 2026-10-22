@@ -16,6 +16,10 @@ Prompt 工程策略:
   当前使用 DeepSeek V4 Pro（兼容 Anthropic Messages API）
   可通过 ANTHROPIC_BASE_URL + LLM_MODEL 环境变量切换
 
+自我修正:
+  SQL 执行失败时，调用方可把失败的 SQL 和数据库报错回传给 generate_sql，
+  模型基于报错重写一次（典型场景：列名写错、类型不匹配、GROUP BY 缺列）
+
 异常约定:
   ValueError   — 问题无法转换为 SQL（LLM 返回 UNANSWERABLE）
   RuntimeError — API 网络/认证异常（调用方应返回 502）
@@ -24,17 +28,26 @@ Prompt 工程策略:
 
 import re
 import anthropic
-from backend.config import ANTHROPIC_API_KEY, ANTHROPIC_BASE_URL, LLM_MODEL
+from backend.config import ANTHROPIC_API_KEY, ANTHROPIC_BASE_URL, LLM_MODEL, LLM_TIMEOUT_SECONDS
 from backend.database import get_ddl
 
 # ---------------------------------------------------------------------------
-# API 客户端（模块级单例）
+# API 客户端（懒加载单例：未配置 Key 时导入本模块不报错）
 # ---------------------------------------------------------------------------
 
-_client = anthropic.Anthropic(
-    api_key=ANTHROPIC_API_KEY,
-    base_url=ANTHROPIC_BASE_URL,
-)
+_client: anthropic.Anthropic | None = None
+
+
+def _get_client() -> anthropic.Anthropic:
+    global _client
+    if _client is None:
+        _client = anthropic.Anthropic(
+            api_key=ANTHROPIC_API_KEY,
+            base_url=ANTHROPIC_BASE_URL,
+            timeout=LLM_TIMEOUT_SECONDS,
+            max_retries=2,
+        )
+    return _client
 
 # ---------------------------------------------------------------------------
 # System Prompt 模板
@@ -57,10 +70,14 @@ _SYSTEM_PROMPT_TEMPLATE = """你是一个资深的 PostgreSQL SQL 查询专家�
 5. 聚合查询必须加 GROUP BY，排序用 ORDER BY。
 6. 日期字段使用 DATE 字面量（如 DATE '2026-06-01'），范围用 BETWEEN。
 7. 当前数据覆盖 2026-01-01 到 2026-06-30。用户说“本月”时默认指 2026-06，“上月”默认指 2026-05。
+8. 明细查询（非聚合）默认加 LIMIT 200，除非用户明确要求全部数据。
+9. 结果列使用中文别名（AS "销售额"），方便业务人员阅读。
+10. 订单相关指标只统计有效订单（fact_orders.status = 'paid'）。
 
 ---
 
-## SQL 语法全覆盖参考
+## SQL 语法参考
+> 以下示例中的表名（如 "students"、"scores"）仅用于演示语法，生成 SQL 时必须替换为上方 DDL 中真实存在的表和列。
 
 ### 1. 基本查询 — SELECT / AS / DISTINCT
 - 「查看所有学生」→ SELECT * FROM "students"
@@ -113,7 +130,7 @@ _SYSTEM_PROMPT_TEMPLATE = """你是一个资深的 PostgreSQL SQL 查询专家�
 - 「销售额>=10000为高，>=5000为中，否则低」
   → SELECT CASE WHEN SUM("order_amount")>=10000 THEN '高' WHEN SUM("order_amount")>=5000 THEN '中' ELSE '低' END AS "等级" FROM "fact_orders"
 
-### 12. 日期函数 — YEAR / MONTH / DATE_FORMAT
+### 12. 日期函数 — TO_CHAR / EXTRACT / DATE_TRUNC
 - 「按月统计订单数」→ SELECT TO_CHAR("order_date",'YYYY-MM') AS "月份", COUNT(*) FROM "fact_orders" GROUP BY TO_CHAR("order_date",'YYYY-MM')
 - 「2026年的订单」→ WHERE EXTRACT(YEAR FROM "order_date") = 2026
 - 「5月的订单」→ WHERE EXTRACT(MONTH FROM "order_date") = 5
@@ -128,7 +145,7 @@ _SYSTEM_PROMPT_TEMPLATE = """你是一个资深的 PostgreSQL SQL 查询专家�
 - 「每个地区销售额排名」→ SELECT r."province", SUM(o."order_amount") AS "销售额", RANK() OVER (ORDER BY SUM(o."order_amount") DESC) AS "排名" FROM "fact_orders" o JOIN "dim_region" r ON o."region_id"=r."region_id" GROUP BY r."province"
 
 ### 16. UNION 合并
-- 「2025和2026两年都有记录的客户」→ SELECT "customer_id" FROM "orders_2025" UNION SELECT "customer_id" FROM "orders_2026"
+- 「两个表里都出现过的客户」→ SELECT "customer_id" FROM "表A" UNION SELECT "customer_id" FROM "表B"
 
 ---
 
@@ -138,7 +155,17 @@ _SYSTEM_PROMPT_TEMPLATE = """你是一个资深的 PostgreSQL SQL 查询专家�
 - 列名和表名必须来自上面给出的真实DDL
 - 不要自创列名，不要使用DDL中不存在的表名
 
-## 当前问题
+"""
+
+_REPAIR_TEMPLATE = """上一次生成的 SQL 执行失败了，请根据数据库报错修正，仍然只输出一行 SELECT。
+
+用户问题：{question}
+
+失败的 SQL：
+{failed_sql}
+
+数据库报错：
+{error}
 """
 
 
@@ -169,7 +196,11 @@ def _extract_sql_from_response(raw_text: str) -> str:
     if match:
         return match.group(1).strip()
 
-    # 没有代码块标记，直接返回
+    # 没有代码块标记：模型偶尔会在 SQL 前加一句说明，截取从 SELECT/WITH 开始的部分
+    if not re.match(r"(?i)^\(*\s*(SELECT|WITH)\b", text):
+        start = re.search(r"(?im)^\s*\(*\s*(SELECT|WITH)\b", text)
+        if start:
+            text = text[start.start():].strip()
     return text
 
 
@@ -178,27 +209,26 @@ def _extract_sql_from_response(raw_text: str) -> str:
 # ---------------------------------------------------------------------------
 
 
-def generate_sql(question: str) -> str:
+def generate_sql(question: str, failed_sql: str | None = None, error: str | None = None) -> str:
     """
     将自然语言问题转换为 SQL 语句
 
     这是整个 NL2SQL 链路的核心——输入自然语言，输出可执行的 SQL。
 
     参数:
-        question: 用户的自然语言问题
-                  示例: "每种商品类别的总销售额是多少？"
-                  示例: "2026年5月销量最高的5个商品是哪些？"
+        question:   用户的自然语言问题
+                    示例: "每种商品类别的总销售额是多少？"
+        failed_sql: （可选）上一次执行失败的 SQL，用于自我修正
+        error:      （可选）上一次执行的数据库报错
 
     返回:
         生成的 SQL 字符串
-        示例: "SELECT p.category, SUM(o.price * o.sales_volume) AS total_sales ..."
 
     异常:
         ValueError:
           - 问题无法用 SQL 回答（LLM 返回 UNANSWERABLE）
-          - 可能原因：问的是主观问题、与数据无关、或无法映射到表结构
         RuntimeError:
-          - API 网络请求失败、认证失败、超时等
+          - API 网络请求失败、认证失败、超时，或模型返回空内容
     """
     if not ANTHROPIC_API_KEY:
         raise RuntimeError(
@@ -207,21 +237,22 @@ def generate_sql(question: str) -> str:
         )
 
     # 1. 动态获取最新的数据库 DDL（元数据外挂）
-    ddl = get_ddl()
+    system_prompt = _SYSTEM_PROMPT_TEMPLATE.format(ddl=get_ddl())
 
-    # 2. 组装 System Prompt
-    system_prompt = _SYSTEM_PROMPT_TEMPLATE.format(ddl=ddl)
+    # 2. 组装用户消息（首次生成 / 基于报错修正）
+    if failed_sql and error:
+        user_content = _REPAIR_TEMPLATE.format(question=question, failed_sql=failed_sql, error=error[:1000])
+    else:
+        user_content = question
 
     # 3. 调用大模型
     try:
-        response = _client.messages.create(
+        response = _get_client().messages.create(
             model=LLM_MODEL,
             max_tokens=2048,
             temperature=0,  # 温度为 0 保证相同问题输出相同 SQL
             system=system_prompt,
-            messages=[
-                {"role": "user", "content": question},
-            ],
+            messages=[{"role": "user", "content": user_content}],
             # 禁用 thinking 模式 — 我们只需要直接的SQL输出，不需要推理过程
             thinking={"type": "disabled"},
         )
@@ -230,55 +261,22 @@ def generate_sql(question: str) -> str:
             f"大模型 API 调用失败: {str(exc)}。请检查 API Key 和网络连接。"
         ) from exc
 
-    # 4. 提取纯净 SQL
-    # response.content 是 ContentBlock 列表，可能有：
-    #   - TextBlock (type="text"): 模型的文本输出
-    #   - ThinkingBlock (type="thinking"): 推理过程（已禁用，但做容错）
-    #   - ToolUseBlock (type="tool_use"): 工具调用（本项目不使用）
-    text_blocks = [
+    # 4. 提取纯净 SQL（只信任 text block；thinking 内容是推理草稿，不能当 SQL 执行）
+    raw_output = "".join(
         block.text
         for block in response.content
-        if getattr(block, "type", "unknown") == "text"
-    ]
-
-    # 如果没找到 text block，尝试从 thinking block 中提取（容错处理）
-    if not text_blocks:
-        thinking_blocks = [
-            block.thinking
-            for block in response.content
-            if getattr(block, "type", "unknown") == "thinking"
-        ]
-        if thinking_blocks:
-            # thinking 内容可能包含最终SQL，尝试提取
-            combined = "\n".join(thinking_blocks)
-            sql = _extract_sql_from_response(combined)
-            if sql.upper().strip() == "UNANSWERABLE":
-                raise ValueError(
-                    "您的问题无法转换为 SQL 查询，请尝试更具体的数据分析问题。"
-                    "例如：'每种商品类别的销售额' 或 '每天的订单数趋势'。"
-                )
-            if sql:
-                return sql
-
-        # 尝试直接从 response 的字符串表示中提取
-        raw_str = str(response)
-        # 查找类似 'text': 'SELECT...' 的模式
-        text_match = re.search(r"'text':\s*'([^']*SELECT[^']*)'", raw_str, re.IGNORECASE)
-        if text_match:
-            sql = text_match.group(1)
-            return sql
-
-        # 所有尝试失败
+        if getattr(block, "type", None) == "text"
+    ).strip()
+    if not raw_output:
         raise RuntimeError(
-            "LLM 返回了空的响应内容，请检查模型配置。\n"
+            "LLM 返回了空的响应内容，请检查模型配置。"
             f"响应类型: {[getattr(b, 'type', 'unknown') for b in response.content]}"
         )
 
-    raw_output = "".join(text_blocks)
     sql = _extract_sql_from_response(raw_output)
 
     # 5. 处理 UNANSWERABLE
-    if sql.upper().strip() == "UNANSWERABLE":
+    if sql.upper().strip().rstrip(".。") == "UNANSWERABLE":
         raise ValueError(
             "您的问题无法转换为 SQL 查询，请尝试更具体的数据分析问题。"
             "例如：'每种商品类别的销售额' 或 '每天的订单数趋势'。"

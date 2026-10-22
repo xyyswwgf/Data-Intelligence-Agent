@@ -13,8 +13,10 @@ CSV 导入引擎 — 解析、类型推断、建表、批量写入
 
 安全设计:
   - 所有 SQL 由服务端构造，不经过 sql_guard
-  - 列名和表名经过清理 + backtick 包裹
+  - 列名和表名经过清理 + 双引号转义，并按 PostgreSQL 63 字节上限截断
+  - 列类型（含用户覆盖）必须命中白名单，杜绝 DDL 注入
   - 数据值通过 SQLAlchemy executemany 参数化传递
+  - 覆盖 + 建表 + 写入在同一事务内完成，失败自动回滚，不会留下半张表或误删旧表
 ================================================================================
 """
 
@@ -23,16 +25,32 @@ import io
 import re
 import datetime
 import logging
-from backend.database import execute_ddl, execute_insert, quote_identifier
+from dataclasses import dataclass
+
+from sqlalchemy import text
+
+from backend.database import drop_table, get_connection, quote_identifier, truncate_identifier
 
 logger = logging.getLogger("nl2sql.csv_importer")
 
 # ---------------------------------------------------------------------------
 _NULL_MARKERS = {"", "null", "none", "na", "n/a", "-", "nil", "无", "空", "/"}
-_MAX_COLUMN_NAME_LEN = 64
 _MIN_VARCHAR_LEN = 100
 _MAX_VARCHAR_LEN = 2000
-_UTF8MB4_BYTE_FACTOR = 4
+_BIGINT_MAX = 9_223_372_036_854_775_807
+_INT_MAX = 2_147_483_647
+# 导入时自动生成的技术列，用户 CSV 中的同名列会被重命名，避免建表冲突
+RESERVED_COLUMN_NAMES = {"_id", "_imported_at"}
+
+# 允许出现在 CREATE TABLE 中的列类型（用户覆盖的类型也必须匹配其一）
+_ALLOWED_TYPE_PATTERNS = [
+    re.compile(p, re.IGNORECASE)
+    for p in (
+        r"^(SMALLINT|INT|INTEGER|BIGINT|REAL|DOUBLE PRECISION|NUMERIC|DECIMAL|DATE|TIMESTAMP|TIMESTAMPTZ|TEXT|BOOLEAN)$",
+        r"^(NUMERIC|DECIMAL)\(\s*\d{1,2}\s*(,\s*\d{1,2}\s*)?\)$",
+        r"^(VARCHAR|CHAR)\(\s*\d{1,5}\s*\)$",
+    )
+]
 
 # 非数据行的特征（用于自动检测尾部行）
 _FOOTER_KEYWORDS = ["合计", "总计", "签字", "审核", "日期", "院长", "公章", "备注", "说明"]
@@ -42,58 +60,68 @@ _FOOTER_KEYWORDS = ["合计", "总计", "签字", "审核", "日期", "院长", 
 # 1. CSV 解析
 # ═══════════════════════════════════════════════════════════════
 
-def parse_csv(
+@dataclass
+class ParsedCsv:
+    headers: list[str]
+    rows: list[list[str]]
+    encoding: str
+    delimiter: str
+    header_row: int          # 实际使用的表头行（1-based，自动检测后的结果）
+    data_start_row: int      # 实际数据起始行（1-based）
+    total_lines: int         # 有效（非空）逻辑行总数
+
+
+def detect_encoding(file_bytes: bytes) -> tuple[str, str]:
+    """返回 (解码后的文本, 编码名)。GB18030 是 GBK/GB2312 的超集，覆盖国内常见 Excel 导出。"""
+    for enc in ("utf-8-sig", "gb18030"):
+        try:
+            return file_bytes.decode(enc), ("utf-8" if enc == "utf-8-sig" else enc)
+        except UnicodeDecodeError:
+            continue
+    # latin-1 能解码任意字节，作为兜底（可能出现乱码，前端预览可见）
+    return file_bytes.decode("latin-1"), "latin-1"
+
+
+def read_csv(
     file_bytes: bytes,
     has_header: bool = True,
     header_row: int = 1,
     data_start_row: int | None = None,
     skip_trailing_rows: int = 0,
     combine_header_rows: int = 1,
-) -> tuple[list[str], list[list[str]]]:
-    """解析 CSV 原始字节 → (表头列表, 数据行列表)"""
-    if data_start_row is None:
-        data_start_row = header_row + combine_header_rows if has_header else 1
-
-    # ── 编码检测 ──
-    text = None
-    for enc in ["utf-8", "gbk", "gb2312", "latin-1"]:
-        try:
-            text = file_bytes.decode(enc)
-            logger.info("CSV 编码: %s", enc)
-            break
-        except (UnicodeDecodeError, LookupError):
-            continue
-    if text is None:
-        raise ValueError("无法识别 CSV 文件编码，请确保为 UTF-8 或 GBK 编码。")
-
-    if text and text[0] == "﻿":
-        text = text[1:]
-    if not text.strip():
+) -> ParsedCsv:
+    """解析 CSV 原始字节，返回表头、数据行以及实际使用的编码/分隔符/行号。"""
+    combine_header_rows = max(1, combine_header_rows)
+    text_content, encoding = detect_encoding(file_bytes)
+    logger.info("CSV 编码: %s", encoding)
+    if not text_content.strip():
         raise ValueError("CSV 文件为空。")
 
     # ── 解析 ──
-    delimiter = _detect_delimiter(text)
-    reader = csv.reader(io.StringIO(text, newline=""), delimiter=delimiter)
-    all_lines = list(reader)
-    # 使用逻辑行号（csv.reader 已处理好引号内的换行）
-    # 过滤空行后的逻辑行，1-based 编号
-    logical_rows = [row for row in all_lines if any(c.strip() for c in row)]
+    delimiter = _detect_delimiter(text_content)
+    reader = csv.reader(io.StringIO(text_content, newline=""), delimiter=delimiter)
+    # 使用逻辑行号（csv.reader 已处理好引号内的换行），过滤空行后 1-based 编号
+    logical_rows = [row for row in reader if any(c.strip() for c in row)]
     if not logical_rows:
         raise ValueError("CSV 文件没有有效内容。")
 
-    total_rows = len(logical_rows)
+    total_lines = len(logical_rows)
 
     # ── 跳过末尾行 ──
     if skip_trailing_rows > 0:
-        if skip_trailing_rows >= total_rows:
-            raise ValueError(f"跳过末尾行数({skip_trailing_rows})≥总行数({total_rows})")
-        logical_rows = logical_rows[:total_rows - skip_trailing_rows]
-        total_rows = len(logical_rows)
+        if skip_trailing_rows >= len(logical_rows):
+            raise ValueError(f"跳过末尾行数({skip_trailing_rows})≥总行数({len(logical_rows)})")
+        logical_rows = logical_rows[:len(logical_rows) - skip_trailing_rows]
+    total_rows = len(logical_rows)
 
     # ── 自动检测表头行 ──
     if has_header and header_row <= 0:
         header_row = auto_detect_header_row(logical_rows)
         logger.info("自动检测表头行: %d", header_row)
+    header_row = max(1, header_row)
+
+    if data_start_row is None or data_start_row <= 0:
+        data_start_row = header_row + combine_header_rows if has_header else 1
 
     # ── 提取表头 ──
     if has_header:
@@ -102,7 +130,7 @@ def parse_csv(
             raise ValueError(f"表头行范围超出总行数({total_rows})，请调整行号设置。")
 
         if combine_header_rows == 1:
-            headers = logical_rows[h_idx]
+            headers = [h.strip() for h in logical_rows[h_idx]]
         else:
             header_rows = logical_rows[h_idx:h_idx + combine_header_rows]
             max_c = max((len(r) for r in header_rows), default=0)
@@ -120,6 +148,7 @@ def parse_csv(
         if d_idx >= total_rows:
             raise ValueError(f"数据起始行 {data_start_row} 超出范围({total_rows})")
         rows = logical_rows[d_idx:]
+        data_start_row = d_idx + 1
     else:
         max_c = max((len(row) for row in logical_rows), default=0)
         headers = [f"col_{i + 1}" for i in range(max_c)]
@@ -128,13 +157,32 @@ def parse_csv(
     if not rows:
         raise ValueError("没有找到数据行，请检查「列名所在行」和「数据起始行」设置。")
 
+    # 数据行比表头宽时补齐表头，避免静默丢列
+    widest = max(len(row) for row in rows)
+    for ci in range(len(headers), widest):
+        if any(ci < len(row) and row[ci].strip() for row in rows):
+            headers.append(f"列{ci + 1}")
     max_cols = len(headers)
     rows = [_pad_row(row, max_cols) for row in rows]
 
     logger.info("CSV解析: %d列 %d行 (表头=%d~%d 数据起始=%d 跳末尾=%d)",
                 max_cols, len(rows), header_row, header_row + combine_header_rows - 1,
                 data_start_row, skip_trailing_rows)
-    return headers, rows
+    return ParsedCsv(
+        headers=headers,
+        rows=rows,
+        encoding=encoding,
+        delimiter=delimiter,
+        header_row=header_row if has_header else 0,
+        data_start_row=data_start_row,
+        total_lines=total_lines,
+    )
+
+
+def parse_csv(file_bytes: bytes, **kwargs) -> tuple[list[str], list[list[str]]]:
+    """兼容旧接口：只返回 (表头列表, 数据行列表)。"""
+    parsed = read_csv(file_bytes, **kwargs)
+    return parsed.headers, parsed.rows
 
 
 def _detect_delimiter(text: str) -> str:
@@ -190,22 +238,23 @@ def auto_detect_header_row(logical_rows: list[list[str]]) -> int:
 def sanitize_column_name(raw: str, used_names: set | None = None) -> str:
     if used_names is None:
         used_names = set()
-    name = raw.strip()
-    name = re.sub(r"[\x00-\x1f`]", "", name)
-    name = name.replace("　", " ")
+    name = str(raw).strip()
+    name = re.sub(r"[\x00-\x1f`\"]", "", name)
+    name = name.replace("\u3000", " ")
     name = re.sub(r" {2,}", " ", name).strip()
     if not name:
         name = f"column_{len(used_names) + 1}"
     if name[0].isdigit():
         name = "col_" + name
-    if len(name) > _MAX_COLUMN_NAME_LEN:
-        name = name[:_MAX_COLUMN_NAME_LEN].rstrip()
+    if name.lower() in RESERVED_COLUMN_NAMES:
+        name = "src" + name
+    name = truncate_identifier(name)
     original = name
     counter = 2
-    while name.lower() in {n.lower() for n in used_names}:
+    lowered = {n.lower() for n in used_names}
+    while name.lower() in lowered:
         suffix = f"_{counter}"
-        max_base = _MAX_COLUMN_NAME_LEN - len(suffix)
-        name = original[:max_base].rstrip() + suffix
+        name = truncate_identifier(original, 63 - len(suffix)) + suffix
         counter += 1
     used_names.add(name)
     return name
@@ -215,27 +264,36 @@ def sanitize_column_name(raw: str, used_names: set | None = None) -> str:
 # 3. 表名推导
 # ═══════════════════════════════════════════════════════════════
 
-def derive_table_name(filename: str) -> str:
-    name = filename.rsplit(".", 1)[0] if "." in filename else filename
-    name = re.sub(r"[\x00-\x1f`]", "", name)
-    name = name.replace("　", " ")
-    name = re.sub(r" {2,}", " ", name).strip()
+def normalize_table_name(name: str) -> str:
+    """把任意输入规范化为 csv_ 前缀、仅含字母数字下划线/中文、≤63 字节的表名。"""
+    name = re.sub(r"[^\w]", "_", str(name).strip())
+    name = re.sub(r"_+", "_", name).strip("_")
     if not name:
         name = "imported"
     if not name.lower().startswith("csv_"):
         name = "csv_" + name
-    if len(name) > _MAX_COLUMN_NAME_LEN:
-        name = name[:_MAX_COLUMN_NAME_LEN].rstrip()
-    return name
+    return truncate_identifier(name).rstrip("_")
+
+
+def derive_table_name(filename: str) -> str:
+    name = filename.rsplit(".", 1)[0] if "." in filename else filename
+    return normalize_table_name(name)
 
 
 # ═══════════════════════════════════════════════════════════════
 # 4. 类型推断
 # ═══════════════════════════════════════════════════════════════
 
+def normalize_column_type(column_type: str) -> str:
+    """校验列类型是否在白名单内，返回规范化后的大写类型；不合法则抛 ValueError。"""
+    normalized = re.sub(r"\s+", " ", str(column_type).strip()).upper()
+    if not any(p.match(normalized) for p in _ALLOWED_TYPE_PATTERNS):
+        raise ValueError(f"不支持的列类型: {column_type!r}")
+    return normalized
+
+
 def infer_column_types(headers: list[str], rows: list[list[str]], overrides: dict | None = None) -> list[dict]:
-    if overrides is None:
-        overrides = {}
+    overrides = {k: normalize_column_type(v) for k, v in (overrides or {}).items()}
     if not rows:
         return [{"name": h, "type": overrides.get(h, f"VARCHAR({_MIN_VARCHAR_LEN})"),
                  "nullable": True, "max_len": _MIN_VARCHAR_LEN} for h in headers]
@@ -247,9 +305,9 @@ def infer_column_types(headers: list[str], rows: list[list[str]], overrides: dic
             continue
 
         values = [row[col_idx] if col_idx < len(row) else "" for row in rows]
-        non_null = [v for v in values if v.strip().lower() not in _NULL_MARKERS]
+        non_null = [v.strip() for v in values if v.strip().lower() not in _NULL_MARKERS]
         has_null = len(non_null) < len(values)
-        max_blen = max((len(v.encode("utf-8")) for v in non_null), default=0)
+        max_blen = max((len(v) for v in non_null), default=0)  # PostgreSQL VARCHAR(n) 按字符计数
 
         if not non_null:
             results.append({"name": col_name, "type": f"VARCHAR({_MIN_VARCHAR_LEN})", "nullable": True, "max_len": _MIN_VARCHAR_LEN})
@@ -257,7 +315,7 @@ def infer_column_types(headers: list[str], rows: list[list[str]], overrides: dic
 
         is_int, max_int_val = _try_int(non_null)
         if is_int:
-            int_type = "BIGINT" if max_int_val > 2_147_483_647 else "INT"
+            int_type = "BIGINT" if max_int_val > _INT_MAX else "INT"
             results.append({"name": col_name, "type": int_type, "nullable": has_null, "max_len": max_blen})
         elif (dt := _try_decimal(non_null)):
             results.append({"name": col_name, "type": dt, "nullable": has_null, "max_len": max_blen})
@@ -265,9 +323,10 @@ def infer_column_types(headers: list[str], rows: list[list[str]], overrides: dic
             results.append({"name": col_name, "type": "DATE", "nullable": has_null, "max_len": max_blen})
         elif _try_datetime(non_null):
             results.append({"name": col_name, "type": "TIMESTAMP", "nullable": has_null, "max_len": max_blen})
+        elif max_blen * 2 > _MAX_VARCHAR_LEN:
+            results.append({"name": col_name, "type": "TEXT", "nullable": has_null, "max_len": max_blen})
         else:
-            vlen = max(int(max_blen * _UTF8MB4_BYTE_FACTOR * 0.8), _MIN_VARCHAR_LEN)
-            vlen = min(vlen, _MAX_VARCHAR_LEN)
+            vlen = max(max_blen * 2, _MIN_VARCHAR_LEN)  # 预留一倍余量，便于后续追加数据
             results.append({"name": col_name, "type": f"VARCHAR({vlen})", "nullable": has_null, "max_len": vlen})
 
     return results
@@ -383,55 +442,73 @@ def _guess_semantic_type(column_name: str, db_type: str) -> str | None:
         return "channel"
     if any(token in column_name for token in ("类别", "品类", "类型", "状态")) or any(token in name for token in ("category", "type", "status")):
         return "category"
-    if "INT" in db_type or "DECIMAL" in db_type:
+    if "INT" in db_type or "DECIMAL" in db_type or "NUMERIC" in db_type:
         return "numeric"
     return None
 
 
+_INT_PATTERN = re.compile(r"^[+-]?\d+$")
+_DECIMAL_PATTERN = re.compile(r"^[+-]?(\d+\.?\d*|\.\d+)$")
+_DATE_PATTERN = re.compile(r"^(\d{4})[-/](\d{1,2})[-/](\d{1,2})$")
+_DATETIME_PATTERN = re.compile(r"^\d{4}[-/]\d{1,2}[-/]\d{1,2}[ T]\d{1,2}:\d{2}(:\d{2}(\.\d+)?)?$")
+
+
+def _has_leading_zero(v: str) -> bool:
+    digits = v.lstrip("+-")
+    return len(digits) > 1 and digits.startswith("0")
+
+
 def _try_int(vals):
-    """尝试 INT / BIGINT"""
+    """尝试 INT / BIGINT。带前导零的值（学号、邮编、工号）保留为文本，避免 007 → 7。"""
     max_val = 0
-    try:
-        for v in vals:
-            iv = int(v)
-            max_val = max(max_val, abs(iv))
-        return True, max_val
-    except (ValueError, TypeError):
+    for v in vals:
+        if not _INT_PATTERN.match(v) or _has_leading_zero(v):
+            return False, 0
+        max_val = max(max_val, abs(int(v)))
+    if max_val > _BIGINT_MAX:  # 身份证号等超长数字串
         return False, 0
+    return True, max_val
+
 
 def _try_decimal(vals):
     mi, mf = 0, 0
-    try:
-        for v in vals:
-            s = v.strip()
-            float(s)
-            if "." in s:
-                ip, fp = s.split(".", 1)
-                mi = max(mi, len(ip.lstrip("-")))
-                mf = max(mf, len(fp))
-            else:
-                mi = max(mi, len(s.lstrip("-")))
-        p = min(mi + mf, 18)
-        s = min(mf, 4)
-        return f"DECIMAL({max(p,1)},{s})"
-    except (ValueError, TypeError):
-        return None
+    for v in vals:
+        if not _DECIMAL_PATTERN.match(v):
+            return None
+        if _has_leading_zero(v.split(".", 1)[0]):
+            return None
+        ip, _, fp = v.lstrip("+-").partition(".")
+        mi = max(mi, len(ip.lstrip("0")) or 1)
+        mf = max(mf, len(fp))
+    if mf == 0:
+        return None  # 全是整数却没通过 _try_int（超出 BIGINT）：多半是证件号/流水号，按文本存
+    scale = min(mf, 6)
+    precision = mi + scale
+    if precision > 38:
+        return "NUMERIC"
+    return f"DECIMAL({max(precision, 1)},{scale})"
+
 
 def _try_date(vals):
-    pat = re.compile(r"^\d{4}-\d{2}-\d{2}$")
     for v in vals:
-        v = v.strip()
-        if not pat.match(v): return False
+        m = _DATE_PATTERN.match(v)
+        if not m:
+            return False
         try:
-            datetime.date.fromisoformat(v)
+            datetime.date(int(m.group(1)), int(m.group(2)), int(m.group(3)))
         except ValueError:
             return False
     return True
 
+
 def _try_datetime(vals):
-    pats = [r"^\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2}$", r"^\d{4}/\d{2}/\d{2} \d{2}:\d{2}:\d{2}$"]
     for v in vals:
-        if not any(re.match(p, v.strip()) for p in pats): return False
+        if not _DATETIME_PATTERN.match(v):
+            return False
+        try:
+            datetime.datetime.fromisoformat(v.replace("/", "-"))
+        except ValueError:
+            return False
     return True
 
 
@@ -439,43 +516,57 @@ def _try_datetime(vals):
 # 5. 建表 & 写入
 # ═══════════════════════════════════════════════════════════════
 
-def create_table(table_name: str, columns: list[dict], primary_key_column: str | None = None) -> None:
+def build_create_table_sql(table_name: str, columns: list[dict], primary_key_column: str | None = None) -> str:
     col_defs = []
-    pk_added = False
-    if primary_key_column and any(c["name"] == primary_key_column for c in columns):
-        for col in columns:
-            nc = "NOT NULL" if col["name"] == primary_key_column else "DEFAULT NULL"
-            pk = "PRIMARY KEY" if col["name"] == primary_key_column else ""
-            col_defs.append(f"{quote_identifier(col['name'])} {col['type']} {nc} {pk}".strip())
-        pk_added = True
-    else:
+    has_custom_pk = bool(primary_key_column) and any(c["name"] == primary_key_column for c in columns)
+    if not has_custom_pk:
         col_defs.append('"_id" INT GENERATED BY DEFAULT AS IDENTITY PRIMARY KEY')
-        for col in columns:
-            null_clause = "DEFAULT NULL" if col.get("nullable", True) else "NOT NULL"
-            col_defs.append(f"{quote_identifier(col['name'])} {col['type']} {null_clause}")
+    for col in columns:
+        col_type = normalize_column_type(col["type"])
+        if has_custom_pk and col["name"] == primary_key_column:
+            col_defs.append(f"{quote_identifier(col['name'])} {col_type} NOT NULL PRIMARY KEY")
+        else:
+            null_clause = "NULL" if col.get("nullable", True) else "NOT NULL"
+            col_defs.append(f"{quote_identifier(col['name'])} {col_type} {null_clause}")
+    col_defs.append('"_imported_at" TIMESTAMPTZ DEFAULT CURRENT_TIMESTAMP')
+    return f"CREATE TABLE {quote_identifier(table_name)} (\n  " + ",\n  ".join(col_defs) + "\n)"
 
-    if not pk_added:
-        col_defs.append('"_imported_at" TIMESTAMPTZ DEFAULT CURRENT_TIMESTAMP')
 
-    ddl = f"CREATE TABLE {quote_identifier(table_name)} (\n  " + ",\n  ".join(col_defs) + "\n)"
+def _row_params(row: list[str], width: int) -> dict:
+    return {
+        f"col_{idx}": (value.strip() if value.strip().lower() not in _NULL_MARKERS else None)
+        for idx, value in enumerate(row[:width])
+    }
+
+
+def import_table(
+    table_name: str,
+    columns: list[dict],
+    headers: list[str],
+    rows: list[list[str]],
+    primary_key_column: str | None = None,
+    overwrite: bool = False,
+    batch_size: int = 500,
+) -> int:
+    """
+    在单个事务中完成：(可选)删除旧表 → 建表 → 分批写入。
+
+    任何一步失败都会整体回滚 —— 旧表不会被误删，也不会留下只写了一半的新表。
+    """
+    ddl = build_create_table_sql(table_name, columns, primary_key_column)
     logger.info("DDL: %s", ddl[:300])
-    execute_ddl(ddl)
-
-
-def insert_rows(table_name: str, headers: list[str], rows: list[list[str]], batch_size: int = 500) -> int:
-    if not rows:
-        return 0
     cs = ", ".join(quote_identifier(h) for h in headers)
     ph = ", ".join(f":col_{i}" for i in range(len(headers)))
-    sql = f"INSERT INTO {quote_identifier(table_name)} ({cs}) VALUES ({ph})"
+    insert_sql = text(f"INSERT INTO {quote_identifier(table_name)} ({cs}) VALUES ({ph})")
+
     total = 0
-    for i in range(0, len(rows), batch_size):
-        batch = rows[i:i + batch_size]
-        params = [
-            {f"col_{idx}": (value if value.strip().lower() not in _NULL_MARKERS else None)
-             for idx, value in enumerate(row)}
-            for row in batch
-        ]
-        total += execute_insert(sql, params)
-        logger.info("已插入 %d/%d 行 → %s", total, len(rows), table_name)
+    with get_connection() as conn:
+        if overwrite:
+            drop_table(table_name, conn=conn)
+        conn.execute(text(ddl))
+        for i in range(0, len(rows), batch_size):
+            batch = [_row_params(row, len(headers)) for row in rows[i:i + batch_size]]
+            conn.execute(insert_sql, batch)
+            total += len(batch)
+            logger.info("已插入 %d/%d 行 → %s", total, len(rows), table_name)
     return total

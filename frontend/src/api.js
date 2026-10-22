@@ -4,7 +4,9 @@
  * =========================================================================
  *
  * 封装的接口:
- *   queryNL(question) → 自然语言查询
+ *   queryNL / analyzeQuestion / analyzeTableQuestion → 查询与 Agent 分析
+ *   getAnalysisHistory / getAnalysisDetail / analysisExportUrl → 分析历史与导出
+ *   previewCsv / importCsv / getTables / deleteTable → CSV 导入与表管理
  *   healthCheck()     → 后端健康检查
  *
  * 配置:
@@ -41,7 +43,9 @@ export const apiClient = axios.create({
  *   sql: string,
  *   columns: string[],
  *   data: any[][],
- *   row_count: number
+ *   row_count: number,
+ *   truncated: boolean,
+ *   attempts: number
  * }>}
  *
  * @throws {Error} 网络错误、超时、或后端返回的 4xx/5xx 错误
@@ -84,8 +88,12 @@ export async function getAnalysisHistory() {
 }
 
 export async function getAnalysisDetail(runId) {
-  const response = await apiClient.get(`/api/analysis/${runId}`);
+  const response = await apiClient.get(`/api/analysis/${encodeURIComponent(runId)}`);
   return response.data;
+}
+
+export function analysisExportUrl(runId, format) {
+  return `/api/analysis/${encodeURIComponent(runId)}/export?format=${format}`;
 }
 
 /**
@@ -206,6 +214,6 @@ export async function getTables(options = {}) {
  * @returns {Promise<{deleted: string, message: string}>}
  */
 export async function deleteTable(tableName) {
-  const response = await apiClient.delete(`/api/tables/${tableName}`);
+  const response = await apiClient.delete(`/api/tables/${encodeURIComponent(tableName)}`);
   return response.data;
 }
