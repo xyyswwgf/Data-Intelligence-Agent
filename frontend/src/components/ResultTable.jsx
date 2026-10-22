@@ -1,4 +1,5 @@
 import { useRef, useState } from "react";
+import Icon from "./Icon";
 
 /**
  * 表格展示组件
@@ -58,11 +59,13 @@ function SqlBlock({ sql }) {
 
   return (
     <details className="sql-details">
-      <summary>📝 查看生成的 SQL</summary>
+      <summary>
+        <Icon name="code" size={14} /> 查看生成的 SQL
+      </summary>
       <div className="sql-block-wrapper">
         <pre ref={preRef} className="sql-code">{sql}</pre>
         <button className="copy-btn" onClick={handleCopy}>
-          {copied ? "✅ 已复制" : "📋 复制"}
+          {copied ? "已复制" : "复制"}
         </button>
       </div>
     </details>
@@ -73,7 +76,9 @@ function SqlBlock({ sql }) {
 function EmptyState() {
   return (
     <div className="empty-state">
-      <div className="empty-icon">📭</div>
+      <div className="empty-icon">
+        <Icon name="table" size={28} />
+      </div>
       <p>查询未返回任何数据</p>
       <span className="empty-hint">请尝试调整查询条件或换一个问题</span>
     </div>
@@ -87,13 +92,12 @@ export default function ResultTable({ columns, data, sql, truncated }) {
   }
 
   return (
-    <div className="result-section">
+    <div className="panel result-section">
       <div className="result-header">
-        <h3>
-          📊 查询结果（共{" "}
-          <span className="row-count">{data.length}</span>{" "}
-          条记录）
-        </h3>
+        <h4 className="panel-title">
+          <Icon name="table" size={15} /> 查询结果
+          <span className="count">{data.length}</span>
+        </h4>
         {truncated && (
           <span className="truncated-hint">结果超过上限，仅展示前 {data.length} 行</span>
         )}
