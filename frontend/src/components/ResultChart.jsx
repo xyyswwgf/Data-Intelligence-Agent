@@ -49,7 +49,8 @@ export default function ResultChart({ columns, data, chartConfig }) {
     return null;
   }
 
-  const { chartType, xAxis, yAxis } = chartConfig;
+  const { chartType, xAxis, yAxis } = chartConfig || {};
+  if (!chartType || !yAxis?.length) return null;
 
   // 找到 X 轴列在 columns 中的索引
   const xAxisIndex = columns.indexOf(xAxis);
@@ -68,7 +69,7 @@ export default function ResultChart({ columns, data, chartConfig }) {
       type: chartType,
       data: data.map((row) => {
         const val = row[yIndex];
-        // pymysql DECIMAL 字段可能返回字符串，需要 parseFloat
+        // 兼容字符串形式的数值
         return typeof val === "string" ? parseFloat(val) : val;
       }),
       // 样式细节
@@ -81,6 +82,8 @@ export default function ResultChart({ columns, data, chartConfig }) {
       },
     };
   }).filter(Boolean);
+
+  const manyPoints = xLabels.length > 30;
 
   // ── ECharts 配置 ──
   const chartOption = {
@@ -124,10 +127,18 @@ export default function ResultChart({ columns, data, chartConfig }) {
     grid: {
       left: "5%",
       right: "5%",
-      bottom: "12%",
+      bottom: manyPoints ? "22%" : "12%",
       top: "15%",
       containLabel: true,
     },
+
+    // 数据点较多时提供缩放条，而不是强行挤下所有标签
+    dataZoom: manyPoints
+      ? [
+          { type: "inside", start: 0, end: Math.min(100, (30 / xLabels.length) * 100) },
+          { type: "slider", bottom: 30, height: 16 },
+        ]
+      : undefined,
 
     // X 轴（类目轴）
     xAxis: {
@@ -139,7 +150,7 @@ export default function ResultChart({ columns, data, chartConfig }) {
       axisLabel: {
         rotate: xLabels.length > 6 ? 30 : 0,
         fontSize: 11,
-        interval: 0, // 显示所有标签
+        interval: manyPoints ? "auto" : 0, // 点少时显示所有标签
       },
     },
 

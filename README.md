@@ -82,6 +82,10 @@ password: Simple@123
 DB_PORT=15432 .venv/bin/uvicorn backend.main:app --host 127.0.0.1 --port 8000 --reload
 ```
 
+> 注意：如果 shell 里残留了旧 MySQL 版本的环境变量（如 `DB_PORT=3306`、`DB_USER=root`、`DB_NAME=nl2sql_db`），
+> 它们会覆盖默认值导致连接失败。可以 `unset DB_PORT DB_USER DB_NAME DB_PASSWORD DB_HOST`，
+> 或复制 `.env.example` 为 `.env` 统一管理配置（`.env` 已被 gitignore）。
+
 启动前端：
 
 ```bash
@@ -115,6 +119,19 @@ LLM_MODEL=deepseek-v4-pro \
 - `ANTHROPIC_AUTH_TOKEN`
 - `DEEPSEEK_API_KEY`
 
+## 安全设计（纵深防御）
+
+| 层级 | 位置 | 作用 |
+|------|------|------|
+| 1 | `llm_service.py` System Prompt | 约束模型只生成单条 SELECT |
+| 2 | `sql_guard.py` | 屏蔽字符串字面量后做语法骨架扫描：仅放行 SELECT/WITH/EXPLAIN，拦截 DDL/DML、`SELECT INTO`、`COPY`、`pg_sleep`、`pg_read_file`、`dblink`、语句堆叠等 |
+| 3 | `database.execute_readonly_sql` | `READ ONLY` 事务 + `statement_timeout` + 返回行数上限，即使前两层被绕过数据库也拒绝写入 |
+
+CSV 导入侧：列类型（含用户手动覆盖）必须命中白名单，表名/列名按 PostgreSQL 63 字节上限截断，
+覆盖导入的「删旧表 → 建表 → 写入」在同一事务内完成，失败整体回滚。
+
+`/api/query` 在 SQL 执行报错时，会把报错回传给 LLM 自动修正（次数由 `LLM_SQL_REPAIR_ATTEMPTS` 控制，默认 1 次）。
+
 ## 推荐问题
 
 在“分析 Agent”模式下可以直接问：
@@ -124,6 +141,7 @@ LLM_MODEL=deepseek-v4-pro \
 - 哪些渠道 ROI 变差？
 - 哪些商品退款率异常升高？
 - 华北区域高价值用户最近购买情况怎么样？
+- 2026年5月销售额怎么样？（问题中写明月份时，按该月 vs 上一月分析；否则自动取数据中的最新月份）
 
 ## API 示例
 
@@ -225,8 +243,19 @@ Planner -> Knowledge -> SQL -> Executor -> Analysis -> Attribution -> Visualizat
 
 - 增强 RAG：把 `knowledge_chunks` 升级为 pgvector 检索
 - 支持 Excel 文件导入
-- 增加分析历史持久化表
-- 增加端到端测试和截图验证
+- 增加分析历史持久化表（当前为进程内有界存储，默认保留最近 100 条）
+- 经营分析 Agent 目前是确定性模板（可复现、可审计）；可选地引入 LLM 做规划和报告措辞，模板 SQL 作为兜底
+- 增加前端 E2E 测试和截图验证
+
+## 自动化测试
+
+```bash
+.venv/bin/pip install -r backend/requirements-dev.txt
+.venv/bin/python -m pytest backend/tests -q
+```
+
+- `test_sql_guard.py` / `test_csv_importer.py`：纯函数单元测试，无需数据库
+- `test_api.py`：API 集成测试，需要 `docker compose up -d`；LLM 调用全部 mock，不消耗额度。数据库不可用时自动跳过
 
 ## 当前 Demo 边界
 

@@ -1,4 +1,4 @@
-import { useState } from "react";
+import { useRef, useState } from "react";
 
 /**
  * 表格展示组件
@@ -6,7 +6,7 @@ import { useState } from "react";
  * 功能:
  *   - 展示查询结果数据表格
  *   - 可展开查看生成的 SQL，支持一键复制
- *   - 自动识别数字列并格式化显示（千分位、小数位）
+ *   - 数值格式化显示（千分位、小数位），文本原样展示
  *   - 空数据友好提示
  */
 
@@ -27,16 +27,7 @@ function formatCellValue(value) {
     });
   }
 
-  // 字符串数字也格式化
-  if (typeof value === "string" && /^-?\d+(\.\d+)?$/.test(value)) {
-    const num = parseFloat(value);
-    if (!isNaN(num)) {
-      return num.toLocaleString("zh-CN", {
-        minimumFractionDigits: 2,
-        maximumFractionDigits: 4,
-      });
-    }
-  }
+  // 字符串原样展示：学号 "007"、年份 "2026" 等文本不能被格式化成数字
 
   return String(value);
 }
@@ -44,6 +35,7 @@ function formatCellValue(value) {
 // ── SQL 复制按钮 ──
 function SqlBlock({ sql }) {
   const [copied, setCopied] = useState(false);
+  const preRef = useRef(null);
 
   const handleCopy = async () => {
     try {
@@ -52,7 +44,7 @@ function SqlBlock({ sql }) {
       setTimeout(() => setCopied(false), 2000);
     } catch {
       // 降级方案：选中文本
-      const pre = document.getElementById("sql-code-block");
+      const pre = preRef.current;
       if (pre) {
         const range = document.createRange();
         range.selectNode(pre);
@@ -68,7 +60,7 @@ function SqlBlock({ sql }) {
     <details className="sql-details">
       <summary>📝 查看生成的 SQL</summary>
       <div className="sql-block-wrapper">
-        <pre id="sql-code-block" className="sql-code">{sql}</pre>
+        <pre ref={preRef} className="sql-code">{sql}</pre>
         <button className="copy-btn" onClick={handleCopy}>
           {copied ? "✅ 已复制" : "📋 复制"}
         </button>
@@ -89,7 +81,7 @@ function EmptyState() {
 }
 
 // ── 主组件 ──
-export default function ResultTable({ columns, data, sql }) {
+export default function ResultTable({ columns, data, sql, truncated }) {
   if (!columns || columns.length === 0) {
     return <EmptyState />;
   }
@@ -102,6 +94,9 @@ export default function ResultTable({ columns, data, sql }) {
           <span className="row-count">{data.length}</span>{" "}
           条记录）
         </h3>
+        {truncated && (
+          <span className="truncated-hint">结果超过上限，仅展示前 {data.length} 行</span>
+        )}
       </div>
 
       {/* 显示生成的 SQL */}

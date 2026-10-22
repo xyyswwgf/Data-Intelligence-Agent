@@ -10,7 +10,7 @@
  * 推断规则（优先级从高到低）:
  *   1. 有日期/时间列 + 数值列 → line  (折线图，展示趋势)
  *   2. 有分类列 + 数值列        → bar   (柱状图，展示对比)
- *   3. 无可用推断              → bar   (默认柱状图)
+ *   3. 没有数值列 / 只有一行    → null  (不画图，只展示表格)
  *
  * 关于饼图:
  *   饼图适合展示"部分与整体的比例关系"，但信息密度低、对比困难。
@@ -49,8 +49,8 @@ const DATE_COLUMN_PATTERNS = [
 /**
  * 判断某个单元格值是否为数值类型（可用于 Y 轴）
  *
- * 注意: pymysql 返回的 DECIMAL 字段是 Python Decimal，序列化后变为字符串。
- * 因此需要同时检查 number 和数字格式的 string。
+ * 后端已把 NUMERIC 转为 JSON number；仍兼容数字格式的 string，
+ * 以防自定义接口返回字符串形式的数值。
  *
  * @param {string} colName   - 列名（预留，未来可加入语义判断）
  * @param {*}      cellValue - 该列第一行的值（采样）
@@ -66,7 +66,7 @@ function isNumericValue(colName, cellValue) {
     return true;
   }
 
-  // pymysql DECIMAL 类型可能序列化为字符串 "89.00"
+  // 字符串形式的数值，例如 "89.00"
   if (typeof cellValue === "string" && /^-?\d+(\.\d+)?$/.test(cellValue)) {
     return true;
   }
@@ -83,7 +83,7 @@ function isNumericValue(colName, cellValue) {
  *
  * @param {string[]} columns - SQL 查询结果的列名列表
  * @param {any[][]}   data    - 二维数据数组，data[row][col]
- * @returns {{ chartType: 'bar'|'line', xAxis: string, yAxis: string[] }}
+ * @returns {{ chartType: 'bar'|'line'|null, xAxis: string, yAxis: string[] }}
  *
  * @example
  *   // 日期列 + 数值列 → 折线图
@@ -102,9 +102,9 @@ function isNumericValue(colName, cellValue) {
  *   // => { chartType: 'bar', xAxis: 'category', yAxis: ['total_sales'] }
  */
 export function detectChartConfig(columns, data) {
-  // ── 边界条件 ──
-  if (!columns || columns.length === 0 || !data || data.length === 0) {
-    return { chartType: "bar", xAxis: "", yAxis: [] };
+  // ── 边界条件：单行结果（如"总销售额"）用表格展示更清晰 ──
+  if (!columns || columns.length === 0 || !data || data.length < 2) {
+    return { chartType: null, xAxis: "", yAxis: [] };
   }
 
   // ── 按类型分桶：日期列 / 数值列 / 文本列 ──
@@ -112,10 +112,10 @@ export function detectChartConfig(columns, data) {
   const numericColumns = [];
   const textColumns = [];
 
-  const firstRow = data[0];
-
   columns.forEach((colName, index) => {
-    const sampleValue = firstRow[index];
+    // 取该列第一个非空值作为样本，避免首行为 NULL 时误判
+    const sampleRow = data.find((row) => row[index] !== null && row[index] !== undefined);
+    const sampleValue = sampleRow ? sampleRow[index] : null;
 
     if (DATE_COLUMN_PATTERNS.some((pattern) => pattern.test(colName))) {
       dateColumns.push(colName);
@@ -130,16 +130,12 @@ export function detectChartConfig(columns, data) {
   // 优先级：日期列 > 文本列 > 第一列（兜底）
   const xAxis = dateColumns[0] || textColumns[0] || columns[0];
 
-  // ── 推断 Y 轴 ──
-  // 如果有数值列，用所有数值列；否则用最后一列（兜底）
-  const yAxis = numericColumns.length > 0 ? numericColumns : [columns[columns.length - 1]];
-
-  // ── 推断图表类型 ──
-  // 规则: 有日期列 + 有数值列 → 折线图（展示时间序列趋势）
-  if (dateColumns.length > 0 && numericColumns.length > 0) {
-    return { chartType: "line", xAxis, yAxis };
+  // ── 推断 Y 轴：数值列，且不能与 X 轴重复 ──
+  const yAxis = numericColumns.filter((col) => col !== xAxis);
+  if (yAxis.length === 0) {
+    return { chartType: null, xAxis, yAxis: [] };
   }
 
-  // 默认 → 柱状图（对比不同类别的数值大小）
-  return { chartType: "bar", xAxis, yAxis };
+  // 规则: 有日期列 → 折线图（展示时间序列趋势）；否则 → 柱状图（对比不同类别）
+  return { chartType: dateColumns.length > 0 ? "line" : "bar", xAxis, yAxis };
 }

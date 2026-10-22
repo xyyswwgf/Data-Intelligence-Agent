@@ -1,5 +1,15 @@
 # Data Intelligence Agent 测试指南
 
+## 0. 自动化测试（推荐先跑）
+
+```bash
+.venv/bin/pip install -r backend/requirements-dev.txt
+.venv/bin/python -m pytest backend/tests -q
+cd frontend && npm run lint && npm run build
+```
+
+API 集成测试需要 PostgreSQL 已启动；未启动时会自动跳过（显示为 skipped）。
+
 ## 1. 启动服务
 
 启动 PostgreSQL：
