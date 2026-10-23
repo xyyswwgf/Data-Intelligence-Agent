@@ -393,3 +393,127 @@ export function downloadKnowledgeDocument(documentId, filename) {
 export async function askKnowledgeBase(question) {
   return (await apiClient.post("/api/kb/ask", { question }, { timeout: 120000 })).data;
 }
+
+// ---------------------------------------------------------------------------
+// 对话会话（SSE 事件流）
+// ---------------------------------------------------------------------------
+
+export async function listChatSessions() {
+  return (await apiClient.get("/api/chat/sessions")).data;
+}
+
+export async function createChatSession() {
+  return (await apiClient.post("/api/chat/sessions")).data;
+}
+
+export async function getChatSession(id) {
+  return (await apiClient.get(`/api/chat/sessions/${encodeURIComponent(id)}`)).data;
+}
+
+export async function renameChatSession(id, title) {
+  return (await apiClient.patch(`/api/chat/sessions/${encodeURIComponent(id)}`, { title })).data;
+}
+
+export async function deleteChatSession(id) {
+  return (await apiClient.delete(`/api/chat/sessions/${encodeURIComponent(id)}`)).data;
+}
+
+/**
+ * 发送消息并逐个接收事件（Server-Sent Events）。
+ * axios 不支持流式读取，这里用 fetch + ReadableStream 解析 `data: {...}\n\n`。
+ */
+export async function streamChatMessage(sessionId, payload, onEvent, signal) {
+  const response = await fetch(`/api/chat/sessions/${encodeURIComponent(sessionId)}/messages`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json", Authorization: `Bearer ${getToken() || ""}` },
+    body: JSON.stringify(payload),
+    signal,
+  });
+  if (response.status === 401) {
+    setToken(null);
+    window.dispatchEvent(new Event("auth:expired"));
+  }
+  if (!response.ok) {
+    let detail = `请求失败（${response.status}）`;
+    try {
+      detail = (await response.json()).detail || detail;
+    } catch {
+      // 非 JSON 错误体
+    }
+    throw new Error(typeof detail === "string" ? detail : JSON.stringify(detail));
+  }
+  const reader = response.body.getReader();
+  const decoder = new TextDecoder();
+  let buffer = "";
+  for (;;) {
+    const { value, done } = await reader.read();
+    if (done) break;
+    buffer += decoder.decode(value, { stream: true });
+    let index;
+    while ((index = buffer.indexOf("\n\n")) >= 0) {
+      const chunk = buffer.slice(0, index);
+      buffer = buffer.slice(index + 2);
+      const line = chunk.split("\n").find((l) => l.startsWith("data: "));
+      if (line) onEvent(JSON.parse(line.slice(6)));
+    }
+  }
+}
+
+// ---------------------------------------------------------------------------
+// 记忆
+// ---------------------------------------------------------------------------
+
+export async function listMemories() {
+  return (await apiClient.get("/api/memories")).data;
+}
+
+export async function addMemory(payload) {
+  return (await apiClient.post("/api/memories", payload)).data;
+}
+
+export async function updateMemory(id, payload) {
+  return (await apiClient.patch(`/api/memories/${id}`, payload)).data;
+}
+
+export async function deleteMemory(id) {
+  return (await apiClient.delete(`/api/memories/${id}`)).data;
+}
+
+export async function clearMemories() {
+  return (await apiClient.delete("/api/memories")).data;
+}
+
+export async function setMemoryEnabled(enabled) {
+  return (await apiClient.put("/api/memories/settings", { enabled })).data;
+}
+
+// ---------------------------------------------------------------------------
+// 模型 / 技能（用户可选项）与管理员配置
+// ---------------------------------------------------------------------------
+
+export async function getModelOptions() {
+  return (await apiClient.get("/api/models")).data;
+}
+
+export async function getSkillOptions() {
+  return (await apiClient.get("/api/skills")).data;
+}
+
+export const adminApi = {
+  listModels: async () => (await apiClient.get("/api/admin/models")).data,
+  createModel: async (body) => (await apiClient.post("/api/admin/models", body)).data,
+  updateModel: async (id, body) => (await apiClient.patch(`/api/admin/models/${id}`, body)).data,
+  deleteModel: async (id) => (await apiClient.delete(`/api/admin/models/${id}`)).data,
+  setDefaultModel: async (id) => (await apiClient.post(`/api/admin/models/${id}/default`)).data,
+  testModel: async (id) => (await apiClient.post(`/api/admin/models/${id}/test`, null, { timeout: 240000 })).data,
+  discoverModels: async (body) => (await apiClient.post("/api/admin/models/discover", body)).data,
+  listTools: async () => (await apiClient.get("/api/admin/tools")).data,
+  createTool: async (body) => (await apiClient.post("/api/admin/tools", body)).data,
+  updateTool: async (id, body) => (await apiClient.patch(`/api/admin/tools/${id}`, body)).data,
+  deleteTool: async (id) => (await apiClient.delete(`/api/admin/tools/${id}`)).data,
+  testTool: async (id, args) => (await apiClient.post(`/api/admin/tools/${id}/test`, { args }, { timeout: 120000 })).data,
+  listSkills: async () => (await apiClient.get("/api/admin/skills")).data,
+  createSkill: async (body) => (await apiClient.post("/api/admin/skills", body)).data,
+  updateSkill: async (id, body) => (await apiClient.patch(`/api/admin/skills/${id}`, body)).data,
+  deleteSkill: async (id) => (await apiClient.delete(`/api/admin/skills/${id}`)).data,
+};

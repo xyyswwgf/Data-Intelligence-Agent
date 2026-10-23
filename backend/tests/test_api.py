@@ -6,7 +6,7 @@ import uuid
 
 import pytest
 
-from backend import main
+from backend import nl2sql
 from backend.tests.conftest import requires_db
 
 pytestmark = requires_db
@@ -47,13 +47,13 @@ def test_info_hides_system_tables():
 def test_query_self_repairs_after_db_error(monkeypatch):
     calls = []
 
-    def fake_generate(question, failed_sql=None, error=None):
+    def fake_generate(question, failed_sql=None, error=None, provider=None):
         calls.append((failed_sql, error))
         if failed_sql is None:
             return 'SELECT "no_such_column" FROM fact_orders'
         return 'SELECT COUNT(*) AS "订单数" FROM fact_orders'
 
-    monkeypatch.setattr(main, "generate_sql", fake_generate)
+    monkeypatch.setattr(nl2sql, "generate_sql", fake_generate)
     resp = C.post("/api/query", json={"question": "订单数"})
     assert resp.status_code == 200, resp.text
     body = resp.json()
@@ -62,12 +62,12 @@ def test_query_self_repairs_after_db_error(monkeypatch):
 
 
 def test_query_blocks_unsafe_sql(monkeypatch):
-    monkeypatch.setattr(main, "generate_sql", lambda *a, **k: "DROP TABLE fact_orders")
+    monkeypatch.setattr(nl2sql, "generate_sql", lambda *a, **k: "DROP TABLE fact_orders")
     assert C.post("/api/query", json={"question": "x"}).status_code == 403
 
 
 def test_query_empty_result_keeps_columns(monkeypatch):
-    monkeypatch.setattr(main, "generate_sql", lambda *a, **k: "SELECT order_id FROM fact_orders WHERE 1 = 0")
+    monkeypatch.setattr(nl2sql, "generate_sql", lambda *a, **k: "SELECT order_id FROM fact_orders WHERE 1 = 0")
     body = C.post("/api/query", json={"question": "x"}).json()
     assert body["columns"] == ["order_id"] and body["data"] == []
 

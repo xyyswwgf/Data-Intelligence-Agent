@@ -9,6 +9,9 @@ import {
   updateUser,
 } from "../api";
 import { extractErrorMessage } from "../utils/format";
+import ModelsPanel from "./admin/ModelsPanel";
+import SkillsPanel from "./admin/SkillsPanel";
+import ToolsPanel from "./admin/ToolsPanel";
 
 const ROLE_LABEL = { admin: "管理员", editor: "编辑", viewer: "只读成员" };
 const ACTION_LABEL = {
@@ -251,17 +254,23 @@ function SystemPanel() {
 }
 
 export default function AdminView({ user }) {
-  const [tab, setTab] = useState("users");
+  const [tab, setTab] = useState("models");
   return (
     <div className="admin-view">
       <header className="admin-head">
         <h1><Icon name="shield" size={22} /> 系统管理</h1>
         <div className="segmented">
+          <button type="button" className={tab === "models" ? "active" : ""} onClick={() => setTab("models")}><Icon name="sparkles" size={14} /> 模型</button>
+          <button type="button" className={tab === "tools" ? "active" : ""} onClick={() => setTab("tools")}><Icon name="code" size={14} /> 工具</button>
+          <button type="button" className={tab === "skills" ? "active" : ""} onClick={() => setTab("skills")}><Icon name="bulb" size={14} /> 技能</button>
           <button type="button" className={tab === "users" ? "active" : ""} onClick={() => setTab("users")}><Icon name="users" size={14} /> 用户与权限</button>
           <button type="button" className={tab === "audit" ? "active" : ""} onClick={() => setTab("audit")}><Icon name="history" size={14} /> 审计日志</button>
           <button type="button" className={tab === "system" ? "active" : ""} onClick={() => setTab("system")}><Icon name="activity" size={14} /> 系统状态</button>
         </div>
       </header>
+      {tab === "models" && <ModelsPanel />}
+      {tab === "tools" && <ToolsPanel />}
+      {tab === "skills" && <SkillsPanel />}
       {tab === "users" && <UsersPanel currentUser={user} />}
       {tab === "audit" && <AuditPanel />}
       {tab === "system" && <SystemPanel />}

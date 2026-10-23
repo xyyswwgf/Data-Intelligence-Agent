@@ -27,51 +27,22 @@ Prompt 工程策略:
 """
 
 import re
-import anthropic
-from backend.config import ANTHROPIC_API_KEY, ANTHROPIC_BASE_URL, LLM_MODEL, LLM_TIMEOUT_SECONDS
+
 from backend.database import get_ddl
+from backend.llm_gateway import LLMError, Provider, get_provider, llm_configured
 
-# ---------------------------------------------------------------------------
-# API 客户端（懒加载单例：未配置 Key 时导入本模块不报错）
-# ---------------------------------------------------------------------------
-
-_client: anthropic.Anthropic | None = None
+__all__ = ["chat", "generate_sql", "llm_configured"]
 
 
-def _get_client() -> anthropic.Anthropic:
-    global _client
-    if _client is None:
-        _client = anthropic.Anthropic(
-            api_key=ANTHROPIC_API_KEY,
-            base_url=ANTHROPIC_BASE_URL,
-            timeout=LLM_TIMEOUT_SECONDS,
-            max_retries=2,
-        )
-    return _client
-
-def llm_configured() -> bool:
-    return bool(ANTHROPIC_API_KEY)
-
-
-def chat(system: str, user: str, max_tokens: int = 1500) -> str:
-    """通用对话补全（RAG 问答等复用）。失败抛 RuntimeError，由调用方决定降级策略。"""
-    if not ANTHROPIC_API_KEY:
-        raise RuntimeError("未配置大模型 API Key")
+def chat(system: str, user: str, max_tokens: int = 1500, provider: Provider | None = None) -> str:
+    """通用单轮补全（RAG 问答等复用）。失败抛 RuntimeError，由调用方决定降级策略。"""
+    provider = provider or get_provider()
+    if not provider.configured():
+        raise RuntimeError("未配置大模型")
     try:
-        response = _get_client().messages.create(
-            model=LLM_MODEL,
-            max_tokens=max_tokens,
-            temperature=0.2,
-            system=system,
-            messages=[{"role": "user", "content": user}],
-            thinking={"type": "disabled"},
-        )
-    except Exception as exc:
-        raise RuntimeError(f"大模型 API 调用失败: {exc}") from exc
-    output = "".join(b.text for b in response.content if getattr(b, "type", None) == "text").strip()
-    if not output:
-        raise RuntimeError("大模型返回了空内容")
-    return output
+        return provider.complete(system, user, max_tokens=max_tokens)
+    except LLMError as exc:
+        raise RuntimeError(str(exc)) from exc
 
 
 # ---------------------------------------------------------------------------
@@ -234,7 +205,8 @@ def _extract_sql_from_response(raw_text: str) -> str:
 # ---------------------------------------------------------------------------
 
 
-def generate_sql(question: str, failed_sql: str | None = None, error: str | None = None) -> str:
+def generate_sql(question: str, failed_sql: str | None = None, error: str | None = None,
+                 provider: Provider | None = None) -> str:
     """
     将自然语言问题转换为 SQL 语句
 
@@ -255,10 +227,11 @@ def generate_sql(question: str, failed_sql: str | None = None, error: str | None
         RuntimeError:
           - API 网络请求失败、认证失败、超时，或模型返回空内容
     """
-    if not ANTHROPIC_API_KEY:
+    provider = provider or get_provider()
+    if not provider.configured():
         raise RuntimeError(
-            "未配置大模型 API Key。请设置 ANTHROPIC_API_KEY、"
-            "ANTHROPIC_AUTH_TOKEN 或 DEEPSEEK_API_KEY 后重启后端。"
+            "未配置大模型。请设置 LLM_API_KEY / DEEPSEEK_API_KEY（Anthropic 兼容接口），"
+            "或 LLM_PROVIDER=openai_compatible + LLM_BASE_URL 后重启后端。"
         )
 
     # 1. 动态获取最新的数据库 DDL（元数据外挂）
@@ -270,33 +243,18 @@ def generate_sql(question: str, failed_sql: str | None = None, error: str | None
     else:
         user_content = question
 
-    # 3. 调用大模型
+    # 3. 调用大模型（温度 0 保证相同问题输出相同 SQL）
     try:
-        response = _get_client().messages.create(
-            model=LLM_MODEL,
-            max_tokens=2048,
-            temperature=0,  # 温度为 0 保证相同问题输出相同 SQL
-            system=system_prompt,
-            messages=[{"role": "user", "content": user_content}],
-            # 禁用 thinking 模式 — 我们只需要直接的SQL输出，不需要推理过程
-            thinking={"type": "disabled"},
+        response = provider.chat(
+            system_prompt, [{"role": "user", "content": user_content}], max_tokens=2048, temperature=0
         )
-    except Exception as exc:
-        raise RuntimeError(
-            f"大模型 API 调用失败: {str(exc)}。请检查 API Key 和网络连接。"
-        ) from exc
+    except LLMError as exc:
+        raise RuntimeError(f"{exc}。请检查 API Key 和网络连接。") from exc
 
-    # 4. 提取纯净 SQL（只信任 text block；thinking 内容是推理草稿，不能当 SQL 执行）
-    raw_output = "".join(
-        block.text
-        for block in response.content
-        if getattr(block, "type", None) == "text"
-    ).strip()
+    # 4. 提取纯净 SQL（推理内容是草稿，不能当 SQL 执行）
+    raw_output = response.text.strip()
     if not raw_output:
-        raise RuntimeError(
-            "LLM 返回了空的响应内容，请检查模型配置。"
-            f"响应类型: {[getattr(b, 'type', 'unknown') for b in response.content]}"
-        )
+        raise RuntimeError("LLM 返回了空的响应内容，请检查模型配置。")
 
     sql = _extract_sql_from_response(raw_output)
 

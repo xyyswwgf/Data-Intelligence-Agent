@@ -12,7 +12,8 @@ import re
 
 from backend.config import RAG_TOP_K
 from backend.kb.retrieval import search
-from backend.llm_service import chat, llm_configured
+from backend.llm_gateway import get_provider
+from backend.llm_service import chat
 
 logger = logging.getLogger("nl2sql.kb.rag")
 
@@ -23,7 +24,7 @@ _SYSTEM = """你是企业知识库助手。只能依据【参考资料】回答�
 """
 
 
-def ask(question: str, top_k: int = RAG_TOP_K) -> dict:
+def ask(question: str, top_k: int = RAG_TOP_K, provider=None) -> dict:
     question = question.strip()
     result = search(question, top_k=top_k)
     hits = result["hits"]
@@ -42,9 +43,10 @@ def ask(question: str, top_k: int = RAG_TOP_K) -> dict:
         f"[{c['n']}] 《{c['title']}》{(' / ' + c['heading_path']) if c['heading_path'] else ''}\n{c['content']}"
         for c in citations
     )
-    if llm_configured():
+    provider = provider or get_provider()
+    if provider.configured():
         try:
-            answer = chat(_SYSTEM, f"【参考资料】\n{context}\n\n【问题】\n{question}")
+            answer = chat(_SYSTEM, f"【参考资料】\n{context}\n\n【问题】\n{question}", provider=provider)
             used = {int(n) for n in re.findall(r"\[(\d+)\]", answer)}
             for c in citations:
                 c["cited"] = c["n"] in used

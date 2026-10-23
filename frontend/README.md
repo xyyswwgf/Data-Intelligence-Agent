@@ -1,16 +1,45 @@
-# React + Vite
+# DataMind 前端
 
-This template provides a minimal setup to get React working in Vite with HMR and some ESLint rules.
+React 19 + Vite + ECharts。项目整体说明见根目录 [README](../README.md)。
 
-Currently, two official plugins are available:
+## 开发
 
-- [@vitejs/plugin-react](https://github.com/vitejs/vite-plugin-react/blob/main/packages/plugin-react) uses [Oxc](https://oxc.rs)
-- [@vitejs/plugin-react-swc](https://github.com/vitejs/vite-plugin-react/blob/main/packages/plugin-react-swc) uses [SWC](https://swc.rs/)
+```bash
+npm install
+```
 
-## React Compiler
+```bash
+npm run dev
+```
 
-The React Compiler is not enabled on this template because of its impact on dev & build performances. To add it, see [this documentation](https://react.dev/learn/react-compiler/installation).
+开发服务器运行在 `http://localhost:5173`，`/api` 请求代理到 `http://localhost:8000`（见 `vite.config.js`）。
 
-## Expanding the ESLint configuration
+```bash
+npm run lint
+```
 
-If you are developing a production application, we recommend using TypeScript with type-aware lint rules enabled. Check out the [TS template](https://github.com/vitejs/vite/tree/main/packages/create-vite/template-react-ts) for information on how to integrate TypeScript and [`typescript-eslint`](https://typescript-eslint.io) in your project.
+```bash
+npm run build
+```
+
+生产环境由 `deploy/frontend.Dockerfile` 构建静态资源并用 Nginx 提供服务。
+
+## 目录
+
+```text
+src/
+  App.jsx                 路由（hash）、登录态、会话与流式对话
+  api.js                  API 客户端：鉴权、SSE 事件流解析、管理接口
+  components/
+    ChatView.jsx          对话页：首屏、对话流
+    Composer.jsx          输入框：模式、模型、技能选择
+    AssistantAnswer.jsx   智能助手的推理轨迹与回答
+    AgentAnswer.jsx       经营分析结果（指标、图表、归因、报告）
+    MemoryView.jsx        我的记忆
+    wiki/                 知识库：目录树、索引页、阅读、编辑、版本历史、上传
+    admin/                管理页：模型、工具、技能
+  utils/
+    markdown.js           Markdown 渲染（[[双向链接]]、目录、DOMPurify 清洗）
+    chartDetector.js      查询结果的图表类型推断
+    echartsTheme.js       图表主题
+```

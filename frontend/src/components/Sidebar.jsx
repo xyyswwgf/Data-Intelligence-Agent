@@ -16,9 +16,10 @@ export default function Sidebar({
   tables,
   targetTable,
   onSelectTable,
-  history,
-  activeRunId,
-  onSelectHistory,
+  sessions,
+  activeSessionId,
+  onSelectSession,
+  onDeleteSession,
   sourceInfo,
   user,
   onLogout,
@@ -92,20 +93,27 @@ export default function Sidebar({
         </nav>
 
         <nav className="side-section grow">
-          <div className="side-label">最近分析</div>
-          {history.length === 0 && <p className="side-empty">还没有分析记录</p>}
-          {history.map((item) => (
-            <button
-              type="button"
-              key={item.run_id}
-              className={`side-item history ${item.run_id === activeRunId ? "active" : ""}`}
-              onClick={() => onSelectHistory(item.run_id)}
-              title={item.summary}
-            >
-              <Icon name="history" size={15} />
-              <span className="side-text">{item.question}</span>
-            </button>
-          ))}
+          <div className="side-label">对话</div>
+          {sessions.length === 0 && <p className="side-empty">还没有对话</p>}
+          <div className="side-scroll">
+            {sessions.map((item) => (
+              <div key={item.id} className={`side-item history session ${item.id === activeSessionId ? "active" : ""}`}>
+                <button type="button" className="session-open" onClick={() => onSelectSession(item.id)} title={item.title}>
+                  <Icon name="history" size={15} />
+                  <span className="side-text">{item.title}</span>
+                </button>
+                <button
+                  type="button"
+                  className="session-delete"
+                  onClick={() => onDeleteSession(item.id)}
+                  aria-label="删除对话"
+                  title="删除对话"
+                >
+                  <Icon name="trash" size={13} />
+                </button>
+              </div>
+            ))}
+          </div>
         </nav>
 
         <div className="user-card-wrap">
@@ -115,6 +123,9 @@ export default function Sidebar({
                 <span className={`status-dot ${online ? "on" : "off"}`} />
                 {online ? `${sourceInfo.database.engine} · ${sourceInfo.database.name}` : "数据库未连接"}
               </div>
+              <button type="button" onClick={() => { setMenuOpen(false); onNavigate("/memory"); }}>
+                <Icon name="bulb" size={15} /> 我的记忆
+              </button>
               <button type="button" onClick={() => { setMenuOpen(false); onChangePassword(); }}>
                 <Icon name="key" size={15} /> 修改密码
               </button>

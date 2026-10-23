@@ -41,9 +41,9 @@ def test_role_permissions(client, make_user):
 
 
 def test_llm_sql_cannot_read_system_tables(client, admin_headers, monkeypatch):
-    from backend import main
+    from backend import nl2sql
 
-    monkeypatch.setattr(main, "generate_sql", lambda *a, **k: "SELECT username, password_hash FROM users")
+    monkeypatch.setattr(nl2sql, "generate_sql", lambda *a, **k: "SELECT username, password_hash FROM users")
     resp = client.post("/api/query", headers=admin_headers, json={"question": "列出所有用户密码"})
     assert resp.status_code == 500 and "permission denied" in resp.json()["detail"]
 

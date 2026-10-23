@@ -36,10 +36,8 @@ from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import Response
 from pydantic import BaseModel, Field
 
-from backend.llm_service import generate_sql
-from backend.sql_guard import validate_sql, strip_trailing_semicolon
+from backend.nl2sql import QueryBlocked, QueryFailed, QueryLLMError, QueryUnanswerable, answer_query
 from backend.database import (
-    execute_readonly_sql,
     execute_sql,
     get_table_names,
     get_table_row_counts,
@@ -62,7 +60,7 @@ from backend.agent_service import run_analysis, list_history, get_history_detail
 from backend import auth
 from backend.auth import CurrentUser, get_current_user, require_role
 from backend.migrations import run_migrations
-from backend.routers import auth_routes, kb_routes
+from backend.routers import agent_admin_routes, auth_routes, chat_routes, kb_routes
 from backend.generic_table_agent import run_table_analysis
 from backend.config import (
     CORS_ORIGINS,
@@ -72,7 +70,6 @@ from backend.config import (
     DB_HOST,
     DB_NAME,
     DB_PORT,
-    LLM_SQL_REPAIR_ATTEMPTS,
 )
 
 APP_VERSION = "2.0.0"
@@ -127,6 +124,8 @@ app.add_middleware(
 
 app.include_router(auth_routes.router)
 app.include_router(kb_routes.router)
+app.include_router(chat_routes.router)
+app.include_router(agent_admin_routes.router)
 
 # ---------------------------------------------------------------------------
 # 请求/响应模型
@@ -359,61 +358,17 @@ def natural_language_query(req: QueryRequest, user: CurrentUser = Depends(get_cu
     | 500 | 数据库执行失败（已尝试让 LLM 根据报错自我修正） |
     | 502 | LLM API 调用失败 |
     """
-    question = req.question.strip()
-    logger.info("收到查询: %s", question)
-
-    failed_sql: str | None = None
-    last_error: str | None = None
-    for attempt in range(1, LLM_SQL_REPAIR_ATTEMPTS + 2):
-        # -----------------------------------------------------------
-        # Step 1: 调用 LLM 生成 SQL（失败重试时带上上一次的 SQL 和报错）
-        # -----------------------------------------------------------
-        try:
-            sql = generate_sql(question, failed_sql=failed_sql, error=last_error)
-            logger.info("LLM 生成 SQL (第 %d 次): %s", attempt, sql[:200])
-        except ValueError as exc:
-            logger.warning("LLM 无法回答: %s", exc)
-            raise HTTPException(status_code=400, detail=str(exc))
-        except RuntimeError as exc:
-            logger.error("LLM API 异常: %s", exc)
-            raise HTTPException(status_code=502, detail=str(exc))
-
-        # -----------------------------------------------------------
-        # Step 2: SQL 安全校验（纵深防御）—— 安全拦截不重试
-        # -----------------------------------------------------------
-        is_safe, reason = validate_sql(sql)
-        if not is_safe:
-            logger.warning("SQL 安全拦截: %s — %s", reason, sql[:200])
-            raise HTTPException(
-                status_code=403,
-                detail=f"SQL 安全校验未通过: {reason}。系统只允许 SELECT 查询。",
-            )
-
-        # -----------------------------------------------------------
-        # Step 3: 只读事务中执行（第三道防线：READ ONLY + 超时 + 行数上限）
-        # -----------------------------------------------------------
-        try:
-            result = execute_readonly_sql(strip_trailing_semicolon(sql))
-        except Exception as exc:
-            failed_sql = sql
-            last_error = str(getattr(exc, "orig", None) or exc).strip()
-            logger.warning("SQL 执行失败 (第 %d 次): %s — %s", attempt, last_error[:200], sql[:200])
-            continue
-
-        logger.info("查询成功，返回 %d 行数据%s", result["row_count"], "（已截断）" if result["truncated"] else "")
-        return QueryResponse(
-            sql=sql,
-            columns=result["columns"],
-            data=result["data"],
-            row_count=result["row_count"],
-            truncated=result["truncated"],
-            attempts=attempt,
-        )
-
-    raise HTTPException(
-        status_code=500,
-        detail=f"SQL 执行失败（已自动修正 {LLM_SQL_REPAIR_ATTEMPTS} 次）: {last_error}",
-    )
+    try:
+        result = answer_query(req.question.strip())
+    except QueryUnanswerable as exc:
+        raise HTTPException(status_code=400, detail=str(exc))
+    except QueryLLMError as exc:
+        raise HTTPException(status_code=502, detail=str(exc))
+    except QueryBlocked as exc:
+        raise HTTPException(status_code=403, detail=str(exc))
+    except QueryFailed as exc:
+        raise HTTPException(status_code=500, detail=str(exc))
+    return QueryResponse(**result)
 
 
 @app.post("/api/analyze")
