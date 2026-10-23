@@ -1,5 +1,6 @@
 import { useState, useEffect, useRef, useCallback } from "react";
 import { importCsv, previewCsv, getTables, deleteTable } from "../api";
+import Icon from "./Icon";
 
 /**
  * CSV 文件导入组件（含预览调整功能）
@@ -309,22 +310,26 @@ function ImportHistory({ tables, onDelete, onQueryTable, onAnalyzeTable, loading
   if (!tables || tables.length === 0) return null;
   return (
     <div className="import-history">
-      <h4>📋 已导入的数据表（{tables.length}）</h4>
+      <h4>已导入的数据表 <span className="count">{tables.length}</span></h4>
       {tables.map((t) => (
-        <div key={t.table_name} className="history-item">
-          <div className="history-left">
-            <span className="history-icon">📊</span>
-            <div className="history-info">
-              <span className="history-name">{t.table_name}</span>
-              <span className="history-meta">
+        <div key={t.table_name} className="import-item">
+          <div className="import-left">
+            <span className="import-icon"><Icon name="table" size={16} /></span>
+            <div className="import-info">
+              <span className="import-name">{t.table_name}</span>
+              <span className="import-meta">
                 {formatNumber(t.row_count)} 行{t.imported_at && ` · ${formatTime(t.imported_at)}`}
               </span>
             </div>
           </div>
-          <div className="history-actions">
-            <button className="btn-query" onClick={() => onQueryTable(t.table_name)}>🔍 查询</button>
-            <button className="btn-analyze" onClick={() => onAnalyzeTable(t.table_name)}>Agent 分析</button>
-            <button className="delete-btn" onClick={() => onDelete(t.table_name)} disabled={loading}>🗑️</button>
+          <div className="import-actions">
+            <button className="btn-query" onClick={() => onQueryTable(t.table_name)}>查询</button>
+            <button className="btn-analyze" onClick={() => onAnalyzeTable(t.table_name)}>
+              <Icon name="sparkles" size={13} /> 分析
+            </button>
+            <button className="delete-btn" onClick={() => onDelete(t.table_name)} disabled={loading} title="删除表" aria-label="删除表">
+              <Icon name="x" size={14} />
+            </button>
           </div>
         </div>
       ))}
@@ -485,8 +490,7 @@ export default function CsvUploader({ onImportComplete, onQueryTable, onAnalyzeT
   };
 
   return (
-    <details className="csv-uploader" open>
-      <summary>📤 导入 CSV 数据</summary>
+    <div className="csv-uploader">
       <div className="csv-content">
         {/* 上传区域 */}
         <div className={`drop-zone ${dragOver ? "drag-over" : ""}`}
@@ -497,7 +501,7 @@ export default function CsvUploader({ onImportComplete, onQueryTable, onAnalyzeT
             style={{ display: "none" }} onChange={handleFileSelect} disabled={uploading} />
           {!uploading && !result && (
             <>
-              <div className="drop-icon">📁</div>
+              <div className="drop-icon"><Icon name="upload" size={26} /></div>
               <div className="drop-text">拖拽 CSV 文件到这里，或点击选择文件</div>
               <div className="drop-hint">支持 UTF-8 / GBK 编码，最大 10MB，自动识别列类型</div>
             </>
@@ -510,7 +514,7 @@ export default function CsvUploader({ onImportComplete, onQueryTable, onAnalyzeT
           )}
           {result && !uploading && (
             <div className="import-success">
-              <div className="success-icon">✅</div>
+              <div className="success-icon"><Icon name="check" size={24} strokeWidth={2.4} /></div>
               <h4>导入成功！</h4>
               <div className="success-stats">
                 <div className="stat-item"><div className="stat-value">{result.row_count}</div><div className="stat-label">数据行数</div></div>
@@ -523,9 +527,9 @@ export default function CsvUploader({ onImportComplete, onQueryTable, onAnalyzeT
                 ))}
               </div>
               <div className="success-actions">
-                <button className="btn-primary" onClick={() => handleQueryTable(result.table_name)}>🔍 查询这张表</button>
-                <button className="btn-secondary" onClick={() => handleAnalyzeTable(result.table_name)}>Agent 分析</button>
-                <button className="btn-secondary" onClick={() => setResult(null)}>📤 继续上传</button>
+                <button className="btn-primary" onClick={() => handleAnalyzeTable(result.table_name)}>Agent 分析这张表</button>
+                <button className="btn-secondary" onClick={() => handleQueryTable(result.table_name)}>查询数据</button>
+                <button className="btn-secondary" onClick={() => setResult(null)}>继续上传</button>
               </div>
             </div>
           )}
@@ -533,8 +537,8 @@ export default function CsvUploader({ onImportComplete, onQueryTable, onAnalyzeT
 
         {error && (
           <div className="error-banner">
-            <span className="error-icon">⚠️</span><span>{error}</span>
-            <button className="btn-dismiss" onClick={() => setError(null)}>✕</button>
+            <Icon name="alert" size={16} /><span>{error}</span>
+            <button className="btn-dismiss" onClick={() => setError(null)} aria-label="关闭"><Icon name="x" size={14} /></button>
           </div>
         )}
 
@@ -569,6 +573,6 @@ export default function CsvUploader({ onImportComplete, onQueryTable, onAnalyzeT
           onCancel={handleCancelConflict}
         />
       )}
-    </details>
+    </div>
   );
 }

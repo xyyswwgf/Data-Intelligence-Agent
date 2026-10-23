@@ -1,4 +1,6 @@
 import ReactECharts from "echarts-for-react";
+import Icon from "./Icon";
+import { CHART_THEME } from "../utils/echartsTheme";
 
 /**
  * =========================================================================
@@ -72,10 +74,6 @@ export default function ResultChart({ columns, data, chartConfig }) {
         // 兼容字符串形式的数值
         return typeof val === "string" ? parseFloat(val) : val;
       }),
-      // 样式细节
-      itemStyle: {
-        borderRadius: chartType === "bar" ? [6, 6, 0, 0] : undefined,
-      },
       smooth: chartType === "line",
       emphasis: {
         focus: "series",
@@ -87,17 +85,6 @@ export default function ResultChart({ columns, data, chartConfig }) {
 
   // ── ECharts 配置 ──
   const chartOption = {
-    // 标题 — 动态生成
-    title: {
-      text: generateChartTitle(chartType, xAxis, yAxis),
-      left: "center",
-      textStyle: {
-        fontSize: 15,
-        fontWeight: "normal",
-        color: "#888",
-      },
-    },
-
     // 提示框
     tooltip: {
       trigger: "axis",
@@ -128,7 +115,7 @@ export default function ResultChart({ columns, data, chartConfig }) {
       left: "5%",
       right: "5%",
       bottom: manyPoints ? "22%" : "12%",
-      top: "15%",
+      top: "10%",
       containLabel: true,
     },
 
@@ -175,17 +162,18 @@ export default function ResultChart({ columns, data, chartConfig }) {
 
     // 系列
     series: seriesList,
-
-    // 调色盘
-    color: ["#667eea", "#764ba2", "#f093fb", "#4facfe", "#43e97b"],
   };
 
   return (
-    <div className="chart-section">
-      <h3>{chartType === "line" ? "📈 折线图" : "📊 柱状图"}</h3>
+    <div className="panel chart-panel">
+      <h4 className="panel-title">
+        <Icon name={chartType === "line" ? "trend" : "chart"} size={15} />
+        {generateChartTitle(chartType, xAxis, yAxis)}
+      </h4>
       <ReactECharts
         option={chartOption}
-        style={{ height: "420px", width: "100%" }}
+        theme={CHART_THEME}
+        style={{ height: "360px", width: "100%" }}
         notMerge={true}
         lazyUpdate={true}
       />
