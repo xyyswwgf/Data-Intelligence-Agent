@@ -2,7 +2,7 @@ import ReactECharts from "echarts-for-react";
 import Icon from "./Icon";
 import ResultChart from "./ResultChart";
 import ResultTable from "./ResultTable";
-import { analysisExportUrl } from "../api";
+import { downloadAnalysisReport } from "../api";
 import { CHART_THEME } from "../utils/echartsTheme";
 import { formatCell, formatMetric, formatPercent } from "../utils/format";
 
@@ -256,12 +256,12 @@ export function AgentAnswer({ result }) {
             {result.table_name && <span className="tag">{result.table_name}</span>}
             {result.run_id && (
               <span className="export-links">
-                <a href={analysisExportUrl(result.run_id, "markdown")}>
+                <button type="button" onClick={() => downloadAnalysisReport(result.run_id, "markdown")}>
                   <Icon name="download" size={13} /> Markdown
-                </a>
-                <a href={analysisExportUrl(result.run_id, "html")}>
+                </button>
+                <button type="button" onClick={() => downloadAnalysisReport(result.run_id, "html")}>
                   <Icon name="download" size={13} /> HTML
-                </a>
+                </button>
               </span>
             )}
           </div>

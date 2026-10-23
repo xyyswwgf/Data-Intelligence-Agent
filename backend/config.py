@@ -18,10 +18,15 @@ DATABASE_URL = os.getenv(
     f"postgresql+psycopg://{quote_plus(DB_USER)}:{quote_plus(DB_PASSWORD)}@{DB_HOST}:{DB_PORT}/{DB_NAME}",
 )
 
-# 内部表（知识库、历史分析存档等）不暴露给 LLM 和前端表列表
+# 内部表（账号、审计、知识库、分析存档等）不暴露给 LLM 和前端表列表
 SYSTEM_TABLE_PREFIXES = tuple(
-    p.strip() for p in os.getenv("SYSTEM_TABLE_PREFIXES", "knowledge_,analysis_,table_profiles").split(",") if p.strip()
+    p.strip()
+    for p in os.getenv("SYSTEM_TABLE_PREFIXES", "knowledge_,analysis_,table_profiles,wiki_,kb_,auth_,audit_").split(",")
+    if p.strip()
 )
+SYSTEM_TABLES = {"users", "agent_runs", "schema_migrations"}
+# LLM / Agent 生成的 SQL 以该数据库角色执行：只对业务表有 SELECT 权限，读不到账号、审计、知识库等系统表
+SQL_READER_ROLE = os.getenv("SQL_READER_ROLE", "nl2sql_reader")
 
 # ── 只读查询防护（纵深防御第三层） ──
 QUERY_MAX_ROWS = int(os.getenv("QUERY_MAX_ROWS", "2000"))
@@ -47,6 +52,36 @@ LLM_SQL_REPAIR_ATTEMPTS = int(os.getenv("LLM_SQL_REPAIR_ATTEMPTS", "1"))
 CSV_MAX_FILE_SIZE_MB = int(os.getenv("CSV_MAX_FILE_SIZE_MB", "10"))
 CSV_MAX_ROWS = int(os.getenv("CSV_MAX_ROWS", "100000"))
 CSV_BATCH_SIZE = int(os.getenv("CSV_BATCH_SIZE", "500"))
+
+# ── 认证 ──
+AUTH_SESSION_TTL_HOURS = int(os.getenv("AUTH_SESSION_TTL_HOURS", "12"))
+AUTH_MAX_FAILED_LOGINS = int(os.getenv("AUTH_MAX_FAILED_LOGINS", "5"))
+AUTH_LOCK_MINUTES = int(os.getenv("AUTH_LOCK_MINUTES", "15"))
+# 首次启动（users 表为空）时创建的管理员；未设置密码则生成随机密码并打印到日志
+ADMIN_USERNAME = os.getenv("ADMIN_USERNAME", "admin")
+ADMIN_PASSWORD = os.getenv("ADMIN_PASSWORD", "")
+
+# ── 知识库 / RAG ──
+KB_STORAGE_DIR = os.getenv("KB_STORAGE_DIR", os.path.join(os.path.dirname(os.path.dirname(__file__)), "data", "kb_files"))
+KB_MAX_FILE_MB = int(os.getenv("KB_MAX_FILE_MB", "30"))
+KB_CHUNK_SIZE = int(os.getenv("KB_CHUNK_SIZE", "800"))
+KB_CHUNK_OVERLAP = int(os.getenv("KB_CHUNK_OVERLAP", "120"))
+# 测试或单机调试时可设为 false，让索引同步执行
+KB_INDEX_ASYNC = os.getenv("KB_INDEX_ASYNC", "true").lower() in {"1", "true", "yes"}
+RAG_TOP_K = int(os.getenv("RAG_TOP_K", "6"))
+# 向量检索的相似度门槛：低于绝对值、或比最相关结果低太多的片段视为无关（bge-m3 实测无关问题约 0.35~0.45）
+RAG_MIN_SIMILARITY = float(os.getenv("RAG_MIN_SIMILARITY", "0.5"))
+RAG_RELATIVE_SIMILARITY = float(os.getenv("RAG_RELATIVE_SIMILARITY", "0.2"))
+
+# Embedding：OpenAI 兼容的 /v1/embeddings 接口。默认本地 Ollama 的 bge-m3（免费、数据不出网）；
+# 切换到硅基流动云端 BAAI/bge-m3 只需改 BASE_URL / MODEL / API_KEY，向量空间一致，无需重建索引
+EMBEDDING_PROVIDER = os.getenv("EMBEDDING_PROVIDER", "openai_compatible")  # openai_compatible | none
+EMBEDDING_BASE_URL = os.getenv("EMBEDDING_BASE_URL", "http://localhost:11434/v1").rstrip("/")
+EMBEDDING_API_KEY = os.getenv("EMBEDDING_API_KEY", "")
+EMBEDDING_MODEL = os.getenv("EMBEDDING_MODEL", "bge-m3")
+EMBEDDING_DIM = int(os.getenv("EMBEDDING_DIM", "1024"))
+EMBEDDING_BATCH_SIZE = int(os.getenv("EMBEDDING_BATCH_SIZE", "16"))
+EMBEDDING_TIMEOUT_SECONDS = float(os.getenv("EMBEDDING_TIMEOUT_SECONDS", "60"))
 
 # ── Web 配置 ──
 CORS_ORIGINS = [

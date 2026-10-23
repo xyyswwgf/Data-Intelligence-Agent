@@ -1,11 +1,16 @@
+import { useState } from "react";
 import Icon from "./Icon";
 
+const ROLE_LABEL = { admin: "管理员", editor: "编辑", viewer: "只读成员" };
+
 /**
- * 左侧导航：新对话、数据表、最近分析、连接状态
+ * 左侧导航：主导航、新对话、数据空间、最近分析、当前用户
  */
 export default function Sidebar({
   open,
   onClose,
+  view,
+  onNavigate,
   onNewChat,
   onOpenData,
   tables,
@@ -15,9 +20,14 @@ export default function Sidebar({
   activeRunId,
   onSelectHistory,
   sourceInfo,
+  user,
+  onLogout,
+  onChangePassword,
 }) {
+  const [menuOpen, setMenuOpen] = useState(false);
   const imported = (tables || []).filter((t) => t.imported);
   const online = Boolean(sourceInfo);
+  const canImport = user.role !== "viewer";
 
   return (
     <>
@@ -31,6 +41,20 @@ export default function Sidebar({
           </div>
         </div>
 
+        <nav className="main-nav">
+          <button type="button" className={view === "chat" ? "active" : ""} onClick={() => onNavigate("/")}>
+            <Icon name="sparkles" size={16} /> 智能分析
+          </button>
+          <button type="button" className={view === "wiki" ? "active" : ""} onClick={() => onNavigate("/wiki")}>
+            <Icon name="book" size={16} /> 知识库
+          </button>
+          {user.role === "admin" && (
+            <button type="button" className={view === "admin" ? "active" : ""} onClick={() => onNavigate("/admin")}>
+              <Icon name="shield" size={16} /> 管理
+            </button>
+          )}
+        </nav>
+
         <button type="button" className="new-chat" onClick={onNewChat}>
           <Icon name="plus" size={16} /> 新对话
         </button>
@@ -39,7 +63,7 @@ export default function Sidebar({
           <div className="side-label">数据空间</div>
           <button
             type="button"
-            className={`side-item ${!targetTable ? "active" : ""}`}
+            className={`side-item ${view === "chat" && !targetTable ? "active" : ""}`}
             onClick={() => onSelectTable(null)}
           >
             <Icon name="database" size={16} />
@@ -50,7 +74,7 @@ export default function Sidebar({
             <button
               type="button"
               key={t.table_name}
-              className={`side-item ${targetTable === t.table_name ? "active" : ""}`}
+              className={`side-item ${view === "chat" && targetTable === t.table_name ? "active" : ""}`}
               onClick={() => onSelectTable(t.table_name)}
               title={t.table_name}
             >
@@ -59,10 +83,12 @@ export default function Sidebar({
               <span className="side-badge">{t.row_count}</span>
             </button>
           ))}
-          <button type="button" className="side-item muted" onClick={onOpenData}>
-            <Icon name="upload" size={16} />
-            <span className="side-text">导入 CSV</span>
-          </button>
+          {canImport && (
+            <button type="button" className="side-item muted" onClick={onOpenData}>
+              <Icon name="upload" size={16} />
+              <span className="side-text">导入 CSV</span>
+            </button>
+          )}
         </nav>
 
         <nav className="side-section grow">
@@ -82,13 +108,31 @@ export default function Sidebar({
           ))}
         </nav>
 
-        <button type="button" className="status-card" onClick={onOpenData}>
-          <span className={`status-dot ${online ? "on" : "off"}`} />
-          <div>
-            <strong>{online ? sourceInfo.database.engine : "后端未连接"}</strong>
-            <small>{online ? `${sourceInfo.database.name} · ${sourceInfo.tables.length} 张表` : "请启动后端服务"}</small>
-          </div>
-        </button>
+        <div className="user-card-wrap">
+          {menuOpen && (
+            <div className="user-menu" onMouseLeave={() => setMenuOpen(false)}>
+              <div className="user-menu-status">
+                <span className={`status-dot ${online ? "on" : "off"}`} />
+                {online ? `${sourceInfo.database.engine} · ${sourceInfo.database.name}` : "数据库未连接"}
+              </div>
+              <button type="button" onClick={() => { setMenuOpen(false); onChangePassword(); }}>
+                <Icon name="key" size={15} /> 修改密码
+              </button>
+              <button type="button" onClick={() => { setMenuOpen(false); onLogout(); }}>
+                <Icon name="logout" size={15} /> 退出登录
+              </button>
+            </div>
+          )}
+          <button type="button" className="status-card" onClick={() => setMenuOpen((v) => !v)}>
+            <span className="avatar">{(user.display_name || user.username).slice(0, 1).toUpperCase()}</span>
+            <div>
+              <strong>{user.display_name}</strong>
+              <small>
+                <span className={`status-dot inline ${online ? "on" : "off"}`} /> {ROLE_LABEL[user.role]} · @{user.username}
+              </small>
+            </div>
+          </button>
+        </div>
       </aside>
     </>
   );

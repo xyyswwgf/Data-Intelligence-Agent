@@ -22,8 +22,17 @@ const PENDING_PLANS = {
   agent: ["planner", "knowledge", "sql", "executor", "analysis", "attribution", "visualization", "report"],
   table: ["schema_profiler", "intent", "generic_sql", "executor", "generic_analysis", "visualization", "report"],
   query: ["understand", "generate", "guard", "execute"],
+  kb: ["retrieve", "rerank", "compose"],
 };
-const QUERY_LABELS = { understand: "理解问题与表结构", generate: "生成 SQL", guard: "安全校验", execute: "只读执行查询" };
+const QUERY_LABELS = {
+  understand: "理解问题与表结构",
+  generate: "生成 SQL",
+  guard: "安全校验",
+  execute: "只读执行查询",
+  retrieve: "检索知识库（向量 + 关键词）",
+  rerank: "融合排序，挑选证据",
+  compose: "生成带引用的回答",
+};
 
 const labelOf = (name) => STEP_LABELS[name] || QUERY_LABELS[name] || name;
 

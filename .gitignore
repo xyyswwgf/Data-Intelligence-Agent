@@ -40,3 +40,6 @@ mysql_data/
 
 # Claude
 .claude/
+
+# 知识库上传的原始文件
+data/

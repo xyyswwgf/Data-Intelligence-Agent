@@ -11,6 +11,7 @@
 
 from __future__ import annotations
 
+import logging
 import re
 import uuid
 from typing import Any, TypedDict
@@ -34,6 +35,8 @@ from backend.agent_common import (
     save_analysis_result,
 )
 from backend.database import execute_sql
+
+logger = logging.getLogger("nl2sql.agent")
 
 __all__ = ["run_analysis", "list_history", "get_history_detail", "export_report", "save_analysis_result"]
 
@@ -78,7 +81,7 @@ class AgentState(TypedDict, total=False):
 _COMPILED_GRAPH = None
 
 
-def run_analysis(question: str, analysis_mode: str = "auto") -> dict[str, Any]:
+def run_analysis(question: str, analysis_mode: str = "auto", user_id: int | None = None) -> dict[str, Any]:
     state: AgentState = {
         "question": question.strip(),
         "analysis_mode": analysis_mode,
@@ -118,12 +121,12 @@ def run_analysis(question: str, analysis_mode: str = "auto") -> dict[str, Any]:
         "report": state.get("report", {}),
         "errors": state.get("errors", []),
     }
-    save_analysis_result(response)
+    save_analysis_result(response, user_id)
     return response
 
 
-def export_report(run_id: str, export_format: str = "markdown") -> tuple[str, str, str] | None:
-    detail = get_history_detail(run_id)
+def export_report(run_id: str, export_format: str = "markdown", user_id: int | None = None) -> tuple[str, str, str] | None:
+    detail = get_history_detail(run_id, user_id)
     if not detail:
         return None
 
@@ -199,6 +202,17 @@ def planner_node(state: AgentState) -> AgentState:
 
 def knowledge_node(state: AgentState) -> AgentState:
     def work() -> str:
+        # 优先检索企业知识库（客户自己的指标口径/业务规则），知识库为空或不可用时回退到内置演示知识
+        try:
+            from backend.kb.rag import knowledge_for_agent
+
+            state["knowledge"] = knowledge_for_agent(state["question"])
+        except Exception as exc:
+            logger.warning("企业知识库检索失败，回退到内置知识: %s", exc)
+            state["knowledge"] = []
+        if state["knowledge"]:
+            return f"从企业知识库检索到 {len(state['knowledge'])} 条相关知识。"
+
         candidates = ("GMV", "销售额", "净销售额", "毛利", "退款", "ROI", "渠道", "华北", "北京", "高价值用户", "销售下降", "利润")
         keywords = [kw for kw in candidates if kw in state["question"]] or ["GMV", "销售下降", "ROI", "退款"]
         clauses = " OR ".join(f"keywords ILIKE :kw{i}" for i in range(len(keywords)))
@@ -208,7 +222,7 @@ def knowledge_node(state: AgentState) -> AgentState:
             params,
         )
         state["knowledge"] = [{"source": row[0], "content": row[1]} for row in result["data"]]
-        return f"检索到 {len(state['knowledge'])} 条业务知识。"
+        return f"检索到 {len(state['knowledge'])} 条内置业务知识。"
 
     return run_node(state, "knowledge", work)
 

@@ -32,6 +32,47 @@ export const apiClient = axios.create({
 });
 
 // ---------------------------------------------------------------------------
+// 登录态：token 存 localStorage，请求自动携带；401 时通知应用回到登录页
+// ---------------------------------------------------------------------------
+
+const TOKEN_KEY = "datamind.token";
+
+export function getToken() {
+  try {
+    return localStorage.getItem(TOKEN_KEY);
+  } catch {
+    return null;
+  }
+}
+
+export function setToken(token) {
+  try {
+    if (token) localStorage.setItem(TOKEN_KEY, token);
+    else localStorage.removeItem(TOKEN_KEY);
+  } catch {
+    // 隐私模式下 localStorage 不可用：本次会话内仍可用内存中的请求头
+  }
+}
+
+apiClient.interceptors.request.use((config) => {
+  const token = getToken();
+  if (token) config.headers.Authorization = `Bearer ${token}`;
+  return config;
+});
+
+apiClient.interceptors.response.use(
+  (response) => response,
+  (error) => {
+    const url = error.config?.url || "";
+    if (error.response?.status === 401 && !url.includes("/api/auth/login")) {
+      setToken(null);
+      window.dispatchEvent(new Event("auth:expired"));
+    }
+    return Promise.reject(error);
+  },
+);
+
+// ---------------------------------------------------------------------------
 // 公开接口
 // ---------------------------------------------------------------------------
 
@@ -92,8 +133,24 @@ export async function getAnalysisDetail(runId) {
   return response.data;
 }
 
-export function analysisExportUrl(runId, format) {
-  return `/api/analysis/${encodeURIComponent(runId)}/export?format=${format}`;
+/** 下载需要鉴权的文件：用 axios 带 token 取 blob，再触发浏览器保存 */
+async function downloadBlob(url, fallbackName) {
+  const response = await apiClient.get(url, { responseType: "blob", timeout: 120000 });
+  const disposition = response.headers["content-disposition"] || "";
+  const match = disposition.match(/filename\*=UTF-8''([^;]+)/i) || disposition.match(/filename="?([^";]+)"?/i);
+  const filename = match ? decodeURIComponent(match[1]) : fallbackName;
+  const href = URL.createObjectURL(response.data);
+  const a = document.createElement("a");
+  a.href = href;
+  a.download = filename;
+  document.body.appendChild(a);
+  a.click();
+  a.remove();
+  setTimeout(() => URL.revokeObjectURL(href), 1000);
+}
+
+export function downloadAnalysisReport(runId, format) {
+  return downloadBlob(`/api/analysis/${encodeURIComponent(runId)}/export?format=${format}`, `analysis.${format === "html" ? "html" : "md"}`);
 }
 
 /**
@@ -216,4 +273,123 @@ export async function getTables(options = {}) {
 export async function deleteTable(tableName) {
   const response = await apiClient.delete(`/api/tables/${encodeURIComponent(tableName)}`);
   return response.data;
+}
+
+// ---------------------------------------------------------------------------
+// 认证 / 用户
+// ---------------------------------------------------------------------------
+
+export async function login(username, password) {
+  const response = await apiClient.post("/api/auth/login", { username, password });
+  setToken(response.data.token);
+  return response.data;
+}
+
+export async function logout() {
+  try {
+    await apiClient.post("/api/auth/logout");
+  } finally {
+    setToken(null);
+  }
+}
+
+export async function getMe() {
+  return (await apiClient.get("/api/auth/me")).data;
+}
+
+export async function changePassword(oldPassword, newPassword) {
+  return (await apiClient.post("/api/auth/change-password", { old_password: oldPassword, new_password: newPassword })).data;
+}
+
+export async function listUsers() {
+  return (await apiClient.get("/api/admin/users")).data;
+}
+
+export async function createUser(payload) {
+  return (await apiClient.post("/api/admin/users", payload)).data;
+}
+
+export async function updateUser(id, payload) {
+  return (await apiClient.patch(`/api/admin/users/${id}`, payload)).data;
+}
+
+export async function getAuditLogs(params) {
+  return (await apiClient.get("/api/admin/audit", { params })).data;
+}
+
+export async function getSystemStatus() {
+  return (await apiClient.get("/api/admin/system", { timeout: 90000 })).data;
+}
+
+export async function reindexKnowledgeBase(allPages = false) {
+  return (await apiClient.post("/api/admin/kb/reindex", null, { params: { all_pages: allPages } })).data;
+}
+
+// ---------------------------------------------------------------------------
+// 知识库 / Wiki
+// ---------------------------------------------------------------------------
+
+export async function getWikiTree() {
+  return (await apiClient.get("/api/wiki/tree")).data;
+}
+
+export async function getWikiIndex() {
+  return (await apiClient.get("/api/wiki/index")).data;
+}
+
+export async function getWikiTag(tag) {
+  return (await apiClient.get(`/api/wiki/tags/${encodeURIComponent(tag)}`)).data;
+}
+
+export async function searchWiki(q) {
+  return (await apiClient.get("/api/wiki/search", { params: { q } })).data;
+}
+
+export async function getWikiPage(slug) {
+  return (await apiClient.get(`/api/wiki/pages/${encodeURIComponent(slug)}`)).data;
+}
+
+export async function createWikiPage(payload) {
+  return (await apiClient.post("/api/wiki/pages", payload)).data;
+}
+
+export async function updateWikiPage(id, payload) {
+  return (await apiClient.put(`/api/wiki/pages/${id}`, payload)).data;
+}
+
+export async function deleteWikiPage(id) {
+  return (await apiClient.delete(`/api/wiki/pages/${id}`)).data;
+}
+
+export async function getWikiVersions(id) {
+  return (await apiClient.get(`/api/wiki/pages/${id}/versions`)).data;
+}
+
+export async function getWikiVersion(id, version) {
+  return (await apiClient.get(`/api/wiki/pages/${id}/versions/${version}`)).data;
+}
+
+export async function restoreWikiVersion(id, version) {
+  return (await apiClient.post(`/api/wiki/pages/${id}/versions/${version}/restore`)).data;
+}
+
+export async function uploadKnowledgeDocument(file, { parentId, tags } = {}) {
+  const formData = new FormData();
+  formData.append("file", file);
+  if (parentId) formData.append("parent_id", String(parentId));
+  if (tags) formData.append("tags", tags);
+  return (
+    await apiClient.post("/api/kb/documents", formData, {
+      headers: { "Content-Type": "multipart/form-data" },
+      timeout: 300000,
+    })
+  ).data;
+}
+
+export function downloadKnowledgeDocument(documentId, filename) {
+  return downloadBlob(`/api/kb/documents/${documentId}/download`, filename || "document");
+}
+
+export async function askKnowledgeBase(question) {
+  return (await apiClient.post("/api/kb/ask", { question }, { timeout: 120000 })).data;
 }

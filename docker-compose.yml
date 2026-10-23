@@ -1,22 +1,79 @@
+# DataMind 私有化部署
+#
+#   本地开发只起数据库：      docker compose up -d postgres
+#   完整部署（前端+后端+库）：docker compose up -d --build
+#   同时启用本地向量模型：    docker compose --profile local-embedding up -d --build
+#
+# 所有密码、密钥通过项目根目录的 .env 配置（参考 .env.example）
+
 services:
   postgres:
-    image: postgres:16
+    # pgvector 镜像 = 官方 PostgreSQL 16 + 向量扩展，可直接复用原 postgres:16 的数据卷
+    image: pgvector/pgvector:pg16
     container_name: data-agent-postgres
     restart: unless-stopped
     environment:
-      POSTGRES_USER: data_agent
-      POSTGRES_PASSWORD: Simple@123
-      POSTGRES_DB: data_agent_db
+      POSTGRES_USER: ${DB_USER:-data_agent}
+      POSTGRES_PASSWORD: ${DB_PASSWORD:-Simple@123}
+      POSTGRES_DB: ${DB_NAME:-data_agent_db}
     ports:
-      - "15432:5432"
+      - "${DB_PUBLISH_PORT:-15432}:5432"
     volumes:
-      - ./backend/init_db.sql:/docker-entrypoint-initdb.d/init_db.sql
+      # 经营分析演示数据；正式交付客户时可删除该挂载
+      - ./backend/init_db.sql:/docker-entrypoint-initdb.d/init_db.sql:ro
       - postgres_data:/var/lib/postgresql/data
     healthcheck:
-      test: ["CMD-SHELL", "pg_isready -U data_agent -d data_agent_db"]
+      test: ["CMD-SHELL", "pg_isready -U ${DB_USER:-data_agent} -d ${DB_NAME:-data_agent_db}"]
       interval: 5s
       timeout: 5s
       retries: 20
 
+  backend:
+    build:
+      context: .
+      dockerfile: deploy/backend.Dockerfile
+    container_name: data-agent-backend
+    restart: unless-stopped
+    env_file:
+      - path: .env
+        required: false
+    environment:
+      DB_HOST: postgres
+      DB_PORT: "5432"
+      KB_STORAGE_DIR: /app/data/kb_files
+      EMBEDDING_BASE_URL: ${EMBEDDING_BASE_URL:-http://ollama:11434/v1}
+      CORS_ORIGINS: ${CORS_ORIGINS:-http://localhost:8080}
+    volumes:
+      - kb_files:/app/data/kb_files
+    depends_on:
+      postgres:
+        condition: service_healthy
+
+  frontend:
+    build:
+      context: .
+      dockerfile: deploy/frontend.Dockerfile
+    container_name: data-agent-frontend
+    restart: unless-stopped
+    ports:
+      - "${WEB_PORT:-8080}:80"
+    depends_on:
+      - backend
+
+  # 可选：本地向量模型（免费、数据不出网）。首次启动后执行：
+  #   docker compose exec ollama ollama pull bge-m3
+  # 国内网络无法访问 Ollama 官方仓库时改用 ModelScope 镜像：
+  #   docker compose exec ollama ollama pull modelscope.cn/gpustack/bge-m3-GGUF
+  #   docker compose exec ollama ollama cp modelscope.cn/gpustack/bge-m3-GGUF bge-m3
+  ollama:
+    image: ollama/ollama:0.6.8
+    container_name: data-agent-ollama
+    restart: unless-stopped
+    profiles: ["local-embedding"]
+    volumes:
+      - ollama_models:/root/.ollama
+
 volumes:
   postgres_data:
+  kb_files:
+  ollama_models:

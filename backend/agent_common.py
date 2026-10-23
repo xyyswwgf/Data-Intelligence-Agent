@@ -5,14 +5,19 @@ Agent 公共组件 — 经营分析 Agent 与 CSV 通用 Agent 共享的节点�
 
 from __future__ import annotations
 
-import threading
+import json
+import logging
 import time
-from collections import OrderedDict
+import uuid
 from typing import Any, Callable
 
+from sqlalchemy import text
+
 from backend.config import ANALYSIS_HISTORY_LIMIT
-from backend.database import execute_readonly_sql
+from backend.database import execute_readonly_sql, get_connection
 from backend.sql_guard import validate_sql
+
+logger = logging.getLogger("nl2sql.agent")
 
 
 # ---------------------------------------------------------------------------
@@ -114,38 +119,57 @@ def render_markdown(title: str, summary: str, findings: list[str], recommendatio
 
 
 # ---------------------------------------------------------------------------
-# 分析历史（进程内、有界、线程安全）
+# 分析历史（持久化到 agent_runs，服务重启不丢失）
 # ---------------------------------------------------------------------------
-# FastAPI 同步路由运行在线程池里，多个请求可能并发写入，因此加锁；
-# 超过上限时淘汰最旧记录，避免长时间运行后内存无限增长。
-
-_HISTORY: OrderedDict[str, dict[str, Any]] = OrderedDict()
-_HISTORY_LOCK = threading.Lock()
 
 
-def save_analysis_result(response: dict[str, Any]) -> None:
-    with _HISTORY_LOCK:
-        _HISTORY[response["run_id"]] = response
-        _HISTORY.move_to_end(response["run_id"])
-        while len(_HISTORY) > ANALYSIS_HISTORY_LIMIT:
-            _HISTORY.popitem(last=False)
+def save_analysis_result(response: dict[str, Any], user_id: int | None = None) -> None:
+    try:
+        with get_connection() as conn:
+            conn.execute(
+                text("""
+                    INSERT INTO agent_runs (run_id, question, table_name, status, summary, result, created_by)
+                    VALUES (:rid, :q, :t, :s, :summary, CAST(:result AS jsonb), :uid)
+                    ON CONFLICT (run_id) DO NOTHING
+                """),
+                {
+                    "rid": response["run_id"],
+                    "q": response["question"],
+                    "t": response.get("table_name"),
+                    "s": response["status"],
+                    "summary": response.get("report", {}).get("summary", ""),
+                    "result": json.dumps(response, ensure_ascii=False, default=str),
+                    "uid": user_id,
+                },
+            )
+    except Exception as exc:  # 历史保存失败不影响本次分析结果返回
+        logger.error("保存分析历史失败: %s", exc)
 
 
-def list_history(limit: int = 20) -> list[dict[str, Any]]:
-    with _HISTORY_LOCK:
-        items = list(_HISTORY.values())[-limit:]
-    return [
-        {
-            "run_id": item["run_id"],
-            "question": item["question"],
-            "table_name": item.get("table_name"),
-            "status": item["status"],
-            "summary": item.get("report", {}).get("summary", ""),
-        }
-        for item in reversed(items)
-    ]
+def list_history(limit: int = 20, user_id: int | None = None) -> list[dict[str, Any]]:
+    """user_id 为 None 时返回全部（管理员视角），否则只返回该用户自己的分析。"""
+    with get_connection() as conn:
+        rows = conn.execute(
+            text("""
+                SELECT run_id::text AS run_id, question, table_name, status, summary, created_at
+                FROM agent_runs
+                WHERE (CAST(:uid AS BIGINT) IS NULL OR created_by = CAST(:uid AS BIGINT))
+                ORDER BY created_at DESC
+                LIMIT :limit
+            """),
+            {"uid": user_id, "limit": min(limit, ANALYSIS_HISTORY_LIMIT)},
+        ).mappings().all()
+    return [dict(r) for r in rows]
 
 
-def get_history_detail(run_id: str) -> dict[str, Any] | None:
-    with _HISTORY_LOCK:
-        return _HISTORY.get(run_id)
+def get_history_detail(run_id: str, user_id: int | None = None) -> dict[str, Any] | None:
+    try:
+        uuid.UUID(str(run_id))
+    except ValueError:
+        return None
+    with get_connection() as conn:
+        row = conn.execute(
+            text("SELECT result FROM agent_runs WHERE run_id = CAST(:rid AS uuid) AND (CAST(:uid AS BIGINT) IS NULL OR created_by = CAST(:uid AS BIGINT))"),
+            {"rid": run_id, "uid": user_id},
+        ).first()
+    return row[0] if row else None
