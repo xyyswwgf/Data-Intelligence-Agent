@@ -4,8 +4,15 @@ import Icon from "./Icon";
 import KbAnswer from "./KbAnswer";
 import { AgentAnswer, QueryAnswer } from "./AgentAnswer";
 import { CompletedSteps, PendingSteps } from "./ThinkingSteps";
+import { AssistantFinal, ReasoningTrace } from "./AssistantAnswer";
 
 const SUGGESTIONS = {
+  assistant: [
+    { icon: "trend", title: "6 月销售额最高的 3 个省份是哪些？", desc: "自己找表、写 SQL、核对口径" },
+    { icon: "sparkles", title: "本月 GMV 为什么下降？给出三条建议", desc: "调用归因分析 + 结合知识库" },
+    { icon: "book", title: "净销售额怎么算？上月是多少？", desc: "知识库口径 + 数据库取数" },
+    { icon: "bulb", title: "记住：我负责华北区域，汇报用表格", desc: "写入长期记忆，之后自动参考" },
+  ],
   agent: [
     { icon: "trend", title: "本月销售额为什么下降？", desc: "趋势 + 地区 / 品类 / 渠道归因" },
     { icon: "map", title: "哪些地区拖累了整体利润？", desc: "定位下滑省份与转化漏斗" },
@@ -32,7 +39,7 @@ const SUGGESTIONS = {
   ],
 };
 
-const MODE_LABEL = { agent: "经营分析 Agent", table: "CSV 通用分析", kb: "知识问答", query: "SQL 查询" };
+const MODE_LABEL = { assistant: "智能助手", agent: "经营分析 Agent", table: "CSV 通用分析", kb: "知识问答", query: "SQL 查询" };
 
 function greeting() {
   const hour = new Date().getHours();
@@ -46,6 +53,12 @@ function turnKind(turn) {
   if (turn.mode === "agent") return turn.table ? "table" : "agent";
   return turn.mode;
 }
+
+const HERO_SUB = {
+  assistant: "我会自己规划步骤：查知识库、找数据表、写 SQL、做归因，并记住你的偏好",
+  kb: "基于企业知识库回答，每个结论都标注来源页面，可点击核对原文",
+  query: "用自然语言查数据，自动生成并校验只读 SQL",
+};
 
 function Turn({ turn, innerRef, onOpenPage }) {
   const kind = turnKind(turn);
@@ -66,8 +79,14 @@ function Turn({ turn, innerRef, onOpenPage }) {
         <div className="agent-body">
           <div className="agent-name">
             DataMind <span>{MODE_LABEL[kind]}</span>
+            {turn.model?.profile_name && (
+              <span className={`model-chip ${turn.model.kind}`}>{turn.model.kind === "local" ? "本地" : "云端"} · {turn.model.profile_name}</span>
+            )}
           </div>
-          {turn.status === "pending" && <PendingSteps kind={kind} />}
+          {turn.mode === "assistant" && (
+            <ReasoningTrace events={turn.events || []} live={turn.status === "pending"} />
+          )}
+          {turn.status === "pending" && turn.mode !== "assistant" && <PendingSteps kind={kind} />}
           {turn.status === "error" && (
             <div className="callout danger">
               <Icon name="alert" size={16} />
@@ -82,13 +101,19 @@ function Turn({ turn, innerRef, onOpenPage }) {
           )}
           {turn.status === "done" && turn.mode === "query" && <QueryAnswer result={turn.result} />}
           {turn.status === "done" && turn.mode === "kb" && <KbAnswer result={turn.result} onOpenPage={onOpenPage} />}
+          {turn.status === "done" && turn.mode === "assistant" && (
+            <AssistantFinal content={turn.content} citations={turn.citations} usage={turn.usage} onOpenPage={onOpenPage} />
+          )}
         </div>
       </div>
     </article>
   );
 }
 
-export default function ChatView({ turns, loading, mode, onModeChange, targetTable, onClearTable, onOpenData, onAsk, onOpenPage }) {
+export default function ChatView({
+  turns, loading, mode, onModeChange, targetTable, onClearTable, onOpenData, onAsk, onOpenPage,
+  models, modelId, onModelChange, skills, skill, onSkillChange,
+}) {
   const lastTurnRef = useRef(null);
   const lastStatus = turns.length ? turns[turns.length - 1].status : null;
 
@@ -97,7 +122,7 @@ export default function ChatView({ turns, loading, mode, onModeChange, targetTab
     lastTurnRef.current?.scrollIntoView({ behavior: "smooth", block: "start" });
   }, [turns.length, lastStatus]);
 
-  const suggestionKey = mode === "agent" && targetTable ? "table" : mode;
+  const suggestionKey = (mode === "agent" || mode === "assistant") && targetTable ? "table" : mode;
   const composer = (
     <Composer
       onSubmit={(q) => onAsk(q)}
@@ -108,6 +133,12 @@ export default function ChatView({ turns, loading, mode, onModeChange, targetTab
       onClearTable={onClearTable}
       onOpenData={onOpenData}
       autoFocus
+      models={models}
+      modelId={modelId}
+      onModelChange={onModelChange}
+      skills={skills}
+      skill={skill}
+      onSkillChange={onSkillChange}
     />
   );
 
@@ -120,8 +151,8 @@ export default function ChatView({ turns, loading, mode, onModeChange, targetTab
           {greeting()}，<span className="gradient-text">今天想分析什么？</span>
         </h1>
         <p className="hero-sub">
-          {mode === "kb"
-            ? "基于企业知识库回答，每个结论都标注来源页面，可点击核对原文"
+          {HERO_SUB[mode] && !(mode === "assistant" && targetTable)
+            ? HERO_SUB[mode]
             : targetTable
               ? `已选中 ${targetTable}，Agent 会自动识别时间列、指标列和维度列`
               : "用一句话描述业务问题，Agent 会规划、查询、归因，并生成图表和报告"}

@@ -1,5 +1,8 @@
 # Data Intelligence Agent 项目计划书
 
+> 本文档描述经营分析 Agent 的业务数据模型与 API 契约。平台整体能力（智能助手、记忆、知识库、模型 / 工具 / 技能管理）
+> 见 [README](README.md)、[ASSISTANT.md](ASSISTANT.md) 与 [KNOWLEDGE_BASE.md](KNOWLEDGE_BASE.md)。
+
 > 版本：v2.0  
 > 状态：Phase 1-4 已实现，CSV 通用分析 Agent 已接入  
 > 技术栈：FastAPI + PostgreSQL + LangGraph + React + ECharts

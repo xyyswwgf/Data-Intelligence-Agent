@@ -41,10 +41,12 @@ services:
       DB_HOST: postgres
       DB_PORT: "5432"
       KB_STORAGE_DIR: /app/data/kb_files
+      APP_DATA_DIR: /app/data
       EMBEDDING_BASE_URL: ${EMBEDDING_BASE_URL:-http://ollama:11434/v1}
       CORS_ORIGINS: ${CORS_ORIGINS:-http://localhost:8080}
     volumes:
-      - kb_files:/app/data/kb_files
+      # 知识库原始文件 + 自动生成的加密密钥（未设置 APP_SECRET_KEY 时）都保存在这个卷里
+      - app_data:/app/data
     depends_on:
       postgres:
         condition: service_healthy
@@ -75,5 +77,5 @@ services:
 
 volumes:
   postgres_data:
-  kb_files:
+  app_data:
   ollama_models:

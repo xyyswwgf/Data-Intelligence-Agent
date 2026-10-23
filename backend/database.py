@@ -182,6 +182,7 @@ def execute_readonly_sql(
     sql: str,
     max_rows: int = QUERY_MAX_ROWS,
     timeout_ms: int = QUERY_TIMEOUT_MS,
+    params: dict | None = None,
 ) -> dict:
     """
     执行不可信 SQL（LLM 生成 / Agent 生成）的唯一入口 —— 纵深防御第三层。
@@ -191,6 +192,7 @@ def execute_readonly_sql(
     - statement_timeout：防止笛卡尔积、pg_sleep 类慢查询拖垮数据库
     - 行数上限：防止一次返回百万行把后端和浏览器撑爆
     - 直接走 DBAPI 游标且不传参数，SQL 中的 '%'、':name' 等字面量不会被当成占位符
+    - params 仅供 SQL 模板工具使用：此时 sql 必须是 psycopg 的 %(name)s 占位符格式，参数由驱动绑定
     """
     with engine.connect() as conn:
         with conn.begin():
@@ -200,7 +202,10 @@ def execute_readonly_sql(
                 conn.execute(text(f"SET LOCAL ROLE {quote_identifier(SQL_READER_ROLE)}"))
             cursor = conn.connection.driver_connection.cursor()
             try:
-                cursor.execute(sql)
+                if params is None:
+                    cursor.execute(sql)
+                else:
+                    cursor.execute(sql, params)
                 if cursor.description is None:
                     return {"columns": [], "data": [], "row_count": 0, "truncated": False}
                 columns = [desc.name for desc in cursor.description]

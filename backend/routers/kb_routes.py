@@ -12,7 +12,7 @@ from backend import auth
 from backend.auth import CurrentUser, get_current_user, require_role
 from backend.config import KB_MAX_FILE_MB, RAG_TOP_K
 from backend.kb import documents, embeddings, indexer, rag, retrieval, wiki
-from backend.llm_service import llm_configured
+from backend import llm_gateway
 
 router = APIRouter(prefix="/api", tags=["knowledge"])
 
@@ -198,7 +198,8 @@ def ask(req: AskRequest, user: CurrentUser = Depends(get_current_user)):
 def system_status(user: CurrentUser = Depends(require_role("admin"))):
     return {
         "embedding": embeddings.health(),
-        "llm_configured": llm_configured(),
+        "llm_configured": llm_gateway.llm_configured(),
+        "llm": llm_gateway.describe(),
         "pending_index": len(indexer.pending_page_ids()),
     }
 

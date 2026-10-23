@@ -223,10 +223,186 @@ def _m003_seed_wiki(conn: Connection) -> None:
     """))
 
 
+def _m004_conversations_and_memory(conn: Connection) -> None:
+    """对话会话、消息（含推理轨迹）与用户长期记忆。"""
+    conn.execute(text(f"""
+        ALTER TABLE users ADD COLUMN IF NOT EXISTS memory_enabled BOOLEAN NOT NULL DEFAULT TRUE;
+
+        CREATE TABLE IF NOT EXISTS chat_sessions (
+            id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+            user_id BIGINT NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+            title VARCHAR(200) NOT NULL DEFAULT '新对话',
+            summary TEXT NOT NULL DEFAULT '',
+            summary_upto INT NOT NULL DEFAULT 0,
+            message_count INT NOT NULL DEFAULT 0,
+            created_at TIMESTAMPTZ NOT NULL DEFAULT now(),
+            updated_at TIMESTAMPTZ NOT NULL DEFAULT now()
+        );
+        CREATE INDEX IF NOT EXISTS idx_chat_sessions_user ON chat_sessions(user_id, updated_at DESC);
+        COMMENT ON COLUMN chat_sessions.summary IS '滚动摘要：较早的消息被压缩到这里，节省上下文';
+        COMMENT ON COLUMN chat_sessions.summary_upto IS '已被摘要覆盖的最大消息序号';
+
+        CREATE TABLE IF NOT EXISTS chat_messages (
+            id BIGSERIAL PRIMARY KEY,
+            session_id UUID NOT NULL REFERENCES chat_sessions(id) ON DELETE CASCADE,
+            seq INT NOT NULL,
+            role VARCHAR(16) NOT NULL CHECK (role IN ('user', 'assistant')),
+            mode VARCHAR(16) NOT NULL DEFAULT 'assistant',
+            content TEXT NOT NULL DEFAULT '',
+            payload JSONB,
+            trace JSONB,
+            token_count INT NOT NULL DEFAULT 0,
+            created_at TIMESTAMPTZ NOT NULL DEFAULT now(),
+            UNIQUE (session_id, seq)
+        );
+
+        CREATE TABLE IF NOT EXISTS user_memories (
+            id BIGSERIAL PRIMARY KEY,
+            user_id BIGINT NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+            content TEXT NOT NULL,
+            category VARCHAR(16) NOT NULL DEFAULT 'fact' CHECK (category IN ('preference', 'fact', 'goal', 'instruction')),
+            pinned BOOLEAN NOT NULL DEFAULT FALSE,
+            source VARCHAR(16) NOT NULL DEFAULT 'auto' CHECK (source IN ('auto', 'explicit', 'manual')),
+            source_session_id UUID REFERENCES chat_sessions(id) ON DELETE SET NULL,
+            embedding vector({int(EMBEDDING_DIM)}),
+            use_count INT NOT NULL DEFAULT 0,
+            last_used_at TIMESTAMPTZ,
+            created_at TIMESTAMPTZ NOT NULL DEFAULT now(),
+            updated_at TIMESTAMPTZ NOT NULL DEFAULT now()
+        );
+        CREATE INDEX IF NOT EXISTS idx_user_memories_user ON user_memories(user_id);
+        CREATE INDEX IF NOT EXISTS idx_user_memories_trgm ON user_memories USING gin(content gin_trgm_ops);
+        CREATE INDEX IF NOT EXISTS idx_user_memories_embedding ON user_memories USING hnsw (embedding vector_cosine_ops);
+    """))
+    if SQL_READER_ROLE and conn.execute(text("SELECT 1 FROM pg_roles WHERE rolname = :r"), {"r": SQL_READER_ROLE}).first():
+        for table in ("chat_sessions", "chat_messages", "user_memories"):
+            conn.execute(text(f"REVOKE ALL ON {table} FROM {quote_identifier(SQL_READER_ROLE)}"))
+
+
+_BUILTIN_TOOLS = [
+    ("search_knowledge", "检索知识库", "检索企业知识库（制度、口径、规则、手册）"),
+    ("list_tables", "查看数据表", "列出可查询的业务数据表"),
+    ("describe_tables", "读取表结构", "查看数据表的字段定义"),
+    ("run_sql", "执行 SQL", "在只读环境执行 SELECT 查询"),
+    ("business_analysis", "经营归因分析", "内置经营数据的完整归因分析"),
+    ("analyze_imported_table", "分析导入表", "对 CSV 导入表做趋势、分组、缺失、异常分析"),
+    ("remember", "写入记忆", "把用户的长期信息存入记忆"),
+    ("use_skill", "加载技能", "按需加载技能的详细指引"),
+]
+
+_SEED_SKILLS = [
+    (
+        "weekly-report",
+        "经营周报",
+        "用户要写周报、月报、经营汇报材料，或要求「按汇报格式输出」时使用。",
+        """# 经营周报写作规范
+
+1. 先调用 business_analysis 获取核心指标和归因结论；需要补充数字时再用 run_sql。
+2. 输出结构固定为：
+   - **一句话结论**（不超过 40 字，包含最关键的变化幅度）
+   - **核心指标表**：指标 / 本期 / 上期 / 环比，金额以万元为单位保留两位小数
+   - **三条主要原因**：每条都要有数据支撑
+   - **下周行动建议**：最多三条，写清负责方向
+3. 口径与知识库保持一致（GMV、净销售额、毛利率）；不确定的口径先调用 search_knowledge。
+4. 不写空话，每个判断都要对应到数字。""",
+        ["business_analysis", "run_sql", "search_knowledge"],
+    ),
+    (
+        "data-quality-check",
+        "数据质量巡检",
+        "用户关心数据是否完整、可信，或问「这个表有没有问题 / 能不能用」时使用。",
+        """# 数据质量巡检流程
+
+1. 用 list_tables / describe_tables 确认目标表和字段。
+2. 依次检查并用 run_sql 给出证据：
+   - 行数与时间覆盖范围（最早、最晚日期，是否有断档的日期）
+   - 关键字段缺失率
+   - 主键/业务键是否重复
+   - 数值字段的负数、零值、极端值
+3. 导入的 CSV 表可直接调用 analyze_imported_table 做缺失和异常初筛。
+4. 结论按「可以直接使用 / 需要注意 / 不建议使用」三档给出，并列出需要业务方确认的问题。""",
+        ["list_tables", "describe_tables", "run_sql", "analyze_imported_table"],
+    ),
+]
+
+
+def _m005_models_tools_skills(conn: Connection) -> None:
+    """模型配置（本地 / 云端切换）、可管理的工具、技能。"""
+    conn.execute(text("""
+        CREATE TABLE IF NOT EXISTS llm_profiles (
+            id BIGSERIAL PRIMARY KEY,
+            name VARCHAR(100) NOT NULL UNIQUE,
+            kind VARCHAR(16) NOT NULL DEFAULT 'cloud' CHECK (kind IN ('local', 'cloud')),
+            provider VARCHAR(32) NOT NULL CHECK (provider IN ('anthropic', 'openai_compatible')),
+            base_url TEXT NOT NULL,
+            api_key_encrypted TEXT,
+            model VARCHAR(200) NOT NULL,
+            context_window INT NOT NULL DEFAULT 64000,
+            max_output_tokens INT NOT NULL DEFAULT 2048,
+            thinking_budget INT NOT NULL DEFAULT 0,
+            reasoning_effort VARCHAR(16) NOT NULL DEFAULT '',
+            no_reasoning_effort VARCHAR(16) NOT NULL DEFAULT '',
+            timeout_seconds INT NOT NULL DEFAULT 60,
+            enabled BOOLEAN NOT NULL DEFAULT TRUE,
+            is_default BOOLEAN NOT NULL DEFAULT FALSE,
+            last_test JSONB,
+            created_at TIMESTAMPTZ NOT NULL DEFAULT now(),
+            updated_at TIMESTAMPTZ NOT NULL DEFAULT now()
+        );
+        CREATE UNIQUE INDEX IF NOT EXISTS uq_llm_profiles_default ON llm_profiles (is_default) WHERE is_default;
+
+        CREATE TABLE IF NOT EXISTS agent_tools (
+            id BIGSERIAL PRIMARY KEY,
+            name VARCHAR(64) NOT NULL UNIQUE,
+            display_name VARCHAR(100) NOT NULL,
+            description TEXT NOT NULL,
+            kind VARCHAR(16) NOT NULL CHECK (kind IN ('builtin', 'http', 'sql')),
+            parameters JSONB NOT NULL DEFAULT '{"type": "object", "properties": {}}'::jsonb,
+            config JSONB NOT NULL DEFAULT '{}'::jsonb,
+            secrets_encrypted TEXT,
+            min_role VARCHAR(16) NOT NULL DEFAULT 'viewer' CHECK (min_role IN ('viewer', 'editor', 'admin')),
+            enabled BOOLEAN NOT NULL DEFAULT TRUE,
+            created_by BIGINT REFERENCES users(id) ON DELETE SET NULL,
+            created_at TIMESTAMPTZ NOT NULL DEFAULT now(),
+            updated_at TIMESTAMPTZ NOT NULL DEFAULT now()
+        );
+
+        CREATE TABLE IF NOT EXISTS agent_skills (
+            id BIGSERIAL PRIMARY KEY,
+            name VARCHAR(64) NOT NULL UNIQUE,
+            title VARCHAR(100) NOT NULL,
+            description TEXT NOT NULL,
+            instructions TEXT NOT NULL,
+            tools TEXT[] NOT NULL DEFAULT '{}',
+            enabled BOOLEAN NOT NULL DEFAULT TRUE,
+            created_by BIGINT REFERENCES users(id) ON DELETE SET NULL,
+            created_at TIMESTAMPTZ NOT NULL DEFAULT now(),
+            updated_at TIMESTAMPTZ NOT NULL DEFAULT now()
+        );
+
+        ALTER TABLE chat_sessions ADD COLUMN IF NOT EXISTS model_profile_id BIGINT REFERENCES llm_profiles(id) ON DELETE SET NULL;
+    """))
+    for name, display, desc in _BUILTIN_TOOLS:
+        conn.execute(text("""
+            INSERT INTO agent_tools (name, display_name, description, kind) VALUES (:n, :d, :desc, 'builtin')
+            ON CONFLICT (name) DO NOTHING
+        """), {"n": name, "d": display, "desc": desc})
+    for name, title, desc, instructions, tools in _SEED_SKILLS:
+        conn.execute(text("""
+            INSERT INTO agent_skills (name, title, description, instructions, tools) VALUES (:n, :t, :d, :i, :tools)
+            ON CONFLICT (name) DO NOTHING
+        """), {"n": name, "t": title, "d": desc, "i": instructions, "tools": tools})
+    if SQL_READER_ROLE and conn.execute(text("SELECT 1 FROM pg_roles WHERE rolname = :r"), {"r": SQL_READER_ROLE}).first():
+        for table in ("llm_profiles", "agent_tools", "agent_skills"):
+            conn.execute(text(f"REVOKE ALL ON {table} FROM {quote_identifier(SQL_READER_ROLE)}"))
+
+
 MIGRATIONS: list[tuple[int, str, Callable[[Connection], None]]] = [
     (1, "core schema: users, audit, wiki, kb, agent_runs", _m001_core_schema),
     (2, "read-only SQL role for LLM/agent queries", _m002_reader_role),
     (3, "seed wiki from demo knowledge_chunks", _m003_seed_wiki),
+    (4, "chat sessions, messages and user memories", _m004_conversations_and_memory),
+    (5, "model profiles, managed tools and skills", _m005_models_tools_skills),
 ]
 
 
