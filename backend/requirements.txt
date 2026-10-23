@@ -7,3 +7,6 @@ langgraph==1.2.4
 pydantic==2.13.4
 python-dotenv==1.0.1
 python-multipart==0.0.20
+httpx==0.28.1
+pypdf==6.21.2
+python-docx==1.2.0

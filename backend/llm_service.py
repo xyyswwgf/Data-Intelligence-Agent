@@ -49,6 +49,31 @@ def _get_client() -> anthropic.Anthropic:
         )
     return _client
 
+def llm_configured() -> bool:
+    return bool(ANTHROPIC_API_KEY)
+
+
+def chat(system: str, user: str, max_tokens: int = 1500) -> str:
+    """通用对话补全（RAG 问答等复用）。失败抛 RuntimeError，由调用方决定降级策略。"""
+    if not ANTHROPIC_API_KEY:
+        raise RuntimeError("未配置大模型 API Key")
+    try:
+        response = _get_client().messages.create(
+            model=LLM_MODEL,
+            max_tokens=max_tokens,
+            temperature=0.2,
+            system=system,
+            messages=[{"role": "user", "content": user}],
+            thinking={"type": "disabled"},
+        )
+    except Exception as exc:
+        raise RuntimeError(f"大模型 API 调用失败: {exc}") from exc
+    output = "".join(b.text for b in response.content if getattr(b, "type", None) == "text").strip()
+    if not output:
+        raise RuntimeError("大模型返回了空内容")
+    return output
+
+
 # ---------------------------------------------------------------------------
 # System Prompt 模板
 # ---------------------------------------------------------------------------

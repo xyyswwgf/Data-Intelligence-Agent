@@ -27,10 +27,11 @@ NL2SQL 智能查询系统 — FastAPI 入口
 import time
 import json
 import logging
+from contextlib import asynccontextmanager
 from typing import Literal
 from urllib.parse import quote
 
-from fastapi import FastAPI, HTTPException, Request, UploadFile, File, Form, Query
+from fastapi import Depends, FastAPI, HTTPException, Request, UploadFile, File, Form, Query
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import Response
 from pydantic import BaseModel, Field
@@ -58,6 +59,10 @@ from backend.csv_importer import (
     RESERVED_COLUMN_NAMES,
 )
 from backend.agent_service import run_analysis, list_history, get_history_detail, export_report
+from backend import auth
+from backend.auth import CurrentUser, get_current_user, require_role
+from backend.migrations import run_migrations
+from backend.routers import auth_routes, kb_routes
 from backend.generic_table_agent import run_table_analysis
 from backend.config import (
     CORS_ORIGINS,
@@ -70,7 +75,7 @@ from backend.config import (
     LLM_SQL_REPAIR_ATTEMPTS,
 )
 
-APP_VERSION = "1.3.0"
+APP_VERSION = "2.0.0"
 
 # ---------------------------------------------------------------------------
 # 日志配置
@@ -85,12 +90,28 @@ logger = logging.getLogger("nl2sql")
 # ---------------------------------------------------------------------------
 # FastAPI 应用
 # ---------------------------------------------------------------------------
+@asynccontextmanager
+async def lifespan(_: FastAPI):
+    """启动时：执行数据库迁移 → 初始化管理员 → 补齐未完成的知识库索引。"""
+    applied = run_migrations()
+    if applied:
+        logger.info("数据库迁移完成: %s", applied)
+    auth.bootstrap_admin()
+    from backend.kb.indexer import reindex
+
+    queued = reindex()
+    if queued:
+        logger.info("已提交 %d 个待索引的知识库页面", queued)
+    yield
+
+
 app = FastAPI(
-    title="NL2SQL 智能查询系统",
-    description="自然语言 → SQL → 数据可视化 | 企业级只读查询网关",
+    title="DataMind 数据智能 Agent",
+    description="自然语言数据分析 + 企业知识库（RAG / Wiki）| 私有化部署",
     version=APP_VERSION,
     docs_url="/api/docs",
     redoc_url="/api/redoc",
+    lifespan=lifespan,
 )
 
 # ---------------------------------------------------------------------------
@@ -100,9 +121,12 @@ app.add_middleware(
     CORSMiddleware,
     allow_origins=CORS_ORIGINS,
     allow_credentials=True,
-    allow_methods=["GET", "POST", "DELETE"],
+    allow_methods=["GET", "POST", "PUT", "PATCH", "DELETE"],
     allow_headers=["*"],
 )
+
+app.include_router(auth_routes.router)
+app.include_router(kb_routes.router)
 
 # ---------------------------------------------------------------------------
 # 请求/响应模型
@@ -267,7 +291,7 @@ def health_check():
 
 
 @app.get("/api/info")
-def data_source_info():
+def data_source_info(user: CurrentUser = Depends(get_current_user)):
     """
     数据来源信息 — 告诉前端数据库里有什么、数据从哪来
     """
@@ -290,7 +314,7 @@ def data_source_info():
 
 
 @app.post("/api/query", response_model=QueryResponse)
-def natural_language_query(req: QueryRequest):
+def natural_language_query(req: QueryRequest, user: CurrentUser = Depends(get_current_user)):
     """
     核心接口：自然语言 → 数据查询
 
@@ -393,7 +417,7 @@ def natural_language_query(req: QueryRequest):
 
 
 @app.post("/api/analyze")
-def analyze_business_question(req: AnalyzeRequest):
+def analyze_business_question(req: AnalyzeRequest, user: CurrentUser = Depends(get_current_user)):
     """
     数据智能 Agent 分析接口。
 
@@ -403,14 +427,14 @@ def analyze_business_question(req: AnalyzeRequest):
     question = req.question.strip()
     logger.info("收到 Agent 分析请求: %s", question)
     try:
-        return run_analysis(question, req.analysis_mode)
+        return run_analysis(question, req.analysis_mode, user.id)
     except Exception as exc:
         logger.error("Agent 分析失败: %s", exc)
         raise HTTPException(status_code=500, detail=f"Agent 分析失败: {str(exc)}")
 
 
 @app.post("/api/analyze/table")
-def analyze_imported_table(req: TableAnalyzeRequest):
+def analyze_imported_table(req: TableAnalyzeRequest, user: CurrentUser = Depends(get_current_user)):
     """
     CSV 导入表通用分析接口。
 
@@ -421,7 +445,7 @@ def analyze_imported_table(req: TableAnalyzeRequest):
     table_name = req.table_name.strip()
     logger.info("收到 CSV 表 Agent 分析请求: %s / %s", table_name, question)
     try:
-        return run_table_analysis(question, table_name, req.analysis_mode)
+        return run_table_analysis(question, table_name, req.analysis_mode, user.id)
     except PermissionError as exc:
         raise HTTPException(status_code=403, detail=str(exc))
     except ValueError as exc:
@@ -432,21 +456,26 @@ def analyze_imported_table(req: TableAnalyzeRequest):
 
 
 @app.get("/api/analysis/history")
-def analysis_history():
-    return {"items": list_history()}
+def analysis_history(user: CurrentUser = Depends(get_current_user)):
+    # 管理员可以看到所有人的分析，其他成员只看到自己的
+    return {"items": list_history(user_id=None if user.has_role("admin") else user.id)}
 
 
 @app.get("/api/analysis/{run_id}")
-def analysis_detail(run_id: str):
-    detail = get_history_detail(run_id)
+def analysis_detail(run_id: str, user: CurrentUser = Depends(get_current_user)):
+    detail = get_history_detail(run_id, None if user.has_role("admin") else user.id)
     if not detail:
         raise HTTPException(status_code=404, detail=f"分析记录 {run_id} 不存在")
     return detail
 
 
 @app.get("/api/analysis/{run_id}/export")
-def analysis_export(run_id: str, format: str = Query("markdown", pattern="^(markdown|html)$")):
-    exported = export_report(run_id, format)
+def analysis_export(
+    run_id: str,
+    format: str = Query("markdown", pattern="^(markdown|html)$"),
+    user: CurrentUser = Depends(get_current_user),
+):
+    exported = export_report(run_id, format, None if user.has_role("admin") else user.id)
     if not exported:
         raise HTTPException(status_code=404, detail=f"分析记录 {run_id} 不存在")
     content, media_type, filename = exported
@@ -469,6 +498,7 @@ def preview_csv(
     data_start_row: int = Form(0, description="数据起始行号（0=自动）"),
     skip_trailing: int = Form(-1, description="跳过末尾行数（-1=自动检测）"),
     combine_headers: int = Form(1, ge=1, le=10, description="合并表头行数"),
+    user: CurrentUser = Depends(require_role("editor")),
 ):
     """预览 CSV 文件（不创建表），自动检测编码、表头行和末尾非数据行"""
     filename, file_bytes = _read_upload(file)
@@ -556,6 +586,7 @@ def import_csv(
     column_names: str | None = Form(None, description="自定义列名 JSON数组"),
     column_types_override: str | None = Form(None, description="自定义列类型 JSON对象（可选）"),
     primary_key_column: str | None = Form(None, description="指定主键列名（可选，不指定则自动生成_id）"),
+    user: CurrentUser = Depends(require_role("editor")),
 ):
     """
     上传 CSV 文件并自动创建数据库表（支持预览后的自定义配置）
@@ -652,6 +683,8 @@ def import_csv(
         raise HTTPException(status_code=500, detail=f"导入失败，已回滚: {reason}")
 
     logger.info("CSV 导入成功: %s → %d 行", clean_table, inserted)
+    auth.audit("csv_import", user, "table", clean_table,
+               {"filename": original_filename, "rows": inserted, "overwrite": overwrite})
     return ImportResponse(
         table_name=clean_table,
         original_filename=original_filename,
@@ -662,7 +695,10 @@ def import_csv(
 
 
 @app.get("/api/tables", response_model=TableListResponse)
-def list_tables(imported_only: bool = Query(False, description="仅显示导入的表")):
+def list_tables(
+    imported_only: bool = Query(False, description="仅显示导入的表"),
+    user: CurrentUser = Depends(get_current_user),
+):
     """
     获取所有表信息（包含导入状态）
 
@@ -674,7 +710,7 @@ def list_tables(imported_only: bool = Query(False, description="仅显示导入�
 
 
 @app.delete("/api/tables/{table_name}", response_model=DeleteResponse)
-def delete_imported_table(table_name: str):
+def delete_imported_table(table_name: str, user: CurrentUser = Depends(require_role("admin"))):
     """
     删除导入的表
 
@@ -704,6 +740,7 @@ def delete_imported_table(table_name: str):
         )
 
     logger.info("已删除导入表: %s", table_name)
+    auth.audit("table_delete", user, "table", table_name)
     return DeleteResponse(
         deleted=table_name,
         message=f"表 {table_name} 已成功删除",

@@ -1,267 +1,153 @@
-# Data Intelligence Agent
+# DataMind · 数据智能 Agent
 
-企业级数据智能 Agent：面向经营分析场景，支持自然语言提问、Agent 自动规划、多条 PostgreSQL 查询、指标计算、归因分析、ECharts 图表和结构化报告。
-
-当前版本已经从原 NL2SQL MVP 升级到：
-
-- FastAPI 后端
-- PostgreSQL 经营分析数据仓库
-- LangGraph 分析工作流
-- React + Vite + ECharts 前端工作台
-- CSV 自动识别、预览、导入和表管理
+面向企业私有化部署的数据智能平台：用自然语言做经营分析、查询业务数据，并把企业的制度、口径、手册沉淀为可检索、可引用的知识库（RAG + Wiki）。
 
 ## 核心能力
 
-- `/api/query`：保留原自然语言转 SQL 查询能力，需要配置 LLM API Key。
-- `/api/analyze`：经营分析 Agent，不依赖 LLM，自动执行规划、SQL、指标、归因、图表和报告。
-- `/api/analyze/table`：CSV 导入表通用分析 Agent，自动识别字段角色并生成表级分析。
-- `/api/analysis/history`：查看最近 20 次分析历史，当前为内存存储，重启后清空。
-- `/api/analysis/{run_id}/export`：导出单次分析报告，支持 Markdown 和 HTML。
-- `/api/import/csv/preview`：自动识别 CSV 文件编码、列名、字段类型、主键候选、语义列、空值比例、重复行和建议表名。
-- `/api/import/csv`：导入 CSV 到 PostgreSQL，支持手动确认列名、类型、主键和表名。
-- `/api/tables`：查看导入表和系统表。
+| 模块 | 能力 |
+|------|------|
+| 经营分析 Agent | LangGraph 工作流：规划 → 检索企业知识 → 多条只读 SQL → 指标计算 → 地区/品类/渠道归因 → ECharts 图表 → 结构化报告（可导出 Markdown / HTML） |
+| CSV 通用分析 | 上传 CSV 自动识别编码、表头、字段类型、主键候选；导入后自动识别时间列 / 指标列 / 维度列做趋势、分组、缺失、异常分析 |
+| 自然语言查询 | LLM 生成 SQL → 安全校验 → 只读执行；执行报错时自动把错误回传给 LLM 修正 |
+| 企业知识库 | Markdown / TXT / PDF / Word 统一转换为 Wiki 页面；目录树、标签索引、`[[双向链接]]`、版本历史与回滚、乐观锁防覆盖 |
+| 知识问答（RAG） | 向量（pgvector + bge-m3）+ 关键词混合检索，RRF 融合排序；回答逐条标注来源页面，可点击核对原文；未配置 LLM 时返回抽取式答案 |
+| 企业级管理 | 账号登录、三级角色权限（只读成员 / 编辑 / 管理员）、登录失败锁定、操作审计日志、系统状态与索引运维 |
 
-## 数据模型
+设计细节见 [KNOWLEDGE_BASE.md](KNOWLEDGE_BASE.md)。
 
-初始化数据位于 `backend/init_db.sql`，当前包含 2026 年 1-6 月模拟经营数据。
-
-核心表：
-
-- `dim_date`：日期维度
-- `dim_region`：大区、省份、城市
-- `dim_product`：商品、品类、成本、标价
-- `dim_channel`：官网、抖音、京东、天猫、线下门店
-- `dim_customer`：客户类型、会员等级、地区
-- `fact_orders`：订单事实表
-- `fact_refunds`：退款事实表
-- `fact_marketing_spend`：营销投放事实表
-- `fact_daily_traffic`：流量和转化漏斗事实表
-- `knowledge_chunks`：业务知识片段，用于关键词检索版 RAG
-
-内置异常场景：
-
-- 2026-06 北京市场销售下降
-- 华北抖音转化率下降
-- 家用电器退款率升高
-- 抖音渠道 ROI 下降
-- 净销售额和毛利率受退款与成本共同影响
-
-## 启动方式
-
-在项目根目录执行：
+## 快速部署（Docker Compose）
 
 ```bash
-cd /Users/xy/PycharmProjects/PythonProject
+cp .env.example .env        # 修改数据库密码、ADMIN_PASSWORD、LLM Key 等
+docker compose --profile local-embedding up -d --build
 ```
 
-安装后端依赖：
+首次启动后拉取本地向量模型（免费、数据不出网）：
 
 ```bash
-.venv/bin/pip install -r backend/requirements.txt
+docker compose exec ollama ollama pull bge-m3
 ```
 
-启动 PostgreSQL：
+国内网络无法访问 Ollama 官方仓库时，改用 ModelScope 镜像：
 
 ```bash
-docker compose up -d
+docker compose exec ollama ollama pull modelscope.cn/gpustack/bge-m3-GGUF
 ```
-
-后端默认连接：
-
-```text
-host: 127.0.0.1
-port: 15432
-database: data_agent_db
-user: data_agent
-password: Simple@123
-```
-
-启动后端：
 
 ```bash
-DB_PORT=15432 .venv/bin/uvicorn backend.main:app --host 127.0.0.1 --port 8000 --reload
+docker compose exec ollama ollama cp modelscope.cn/gpustack/bge-m3-GGUF bge-m3
 ```
 
-> 注意：如果 shell 里残留了旧 MySQL 版本的环境变量（如 `DB_PORT=3306`、`DB_USER=root`、`DB_NAME=nl2sql_db`），
-> 它们会覆盖默认值导致连接失败。可以 `unset DB_PORT DB_USER DB_NAME DB_PASSWORD DB_HOST`，
-> 或复制 `.env.example` 为 `.env` 统一管理配置（`.env` 已被 gitignore）。
+访问 `http://<服务器>:8080`，用 `.env` 中的 `ADMIN_USERNAME` / `ADMIN_PASSWORD` 登录（未设置密码时，随机密码打印在后端日志：`docker compose logs backend`）。
 
-启动前端：
+不想在本机跑模型时，把 `.env` 的 Embedding 改为硅基流动云端 `BAAI/bge-m3`（免费额度，与本地 bge-m3 同一向量空间，切换无需重建索引），并去掉 `--profile local-embedding`。
+
+### 升级
+
+替换代码后重新 `docker compose up -d --build` 即可。数据库迁移在后端启动时自动执行（`backend/migrations.py`，带 advisory lock，多实例安全）。
+
+## 本地开发
 
 ```bash
-cd frontend
-npm run dev
+docker compose up -d postgres
 ```
-
-访问：
-
-```text
-http://localhost:5173
-```
-
-## LLM 配置
-
-`/api/analyze` 不依赖 LLM，可以直接运行。
-
-`/api/query` 需要配置 Anthropic-compatible API Key。DeepSeek 示例：
 
 ```bash
-DB_PORT=15432 \
-DEEPSEEK_API_KEY=你的key \
-ANTHROPIC_BASE_URL=https://api.deepseek.com/anthropic \
-LLM_MODEL=deepseek-v4-pro \
-.venv/bin/uvicorn backend.main:app --host 127.0.0.1 --port 8000 --reload
+.venv/bin/pip install -r backend/requirements-dev.txt
 ```
 
-也支持：
+```bash
+ADMIN_PASSWORD=Admin12345 .venv/bin/uvicorn backend.main:app --host 127.0.0.1 --port 8000 --reload
+```
 
-- `ANTHROPIC_API_KEY`
-- `ANTHROPIC_AUTH_TOKEN`
-- `DEEPSEEK_API_KEY`
+```bash
+cd frontend && npm install && npm run dev
+```
 
-## 安全设计（纵深防御）
+访问 `http://localhost:5173`。
+
+> 如果 shell 里残留旧 MySQL 版本的环境变量（如 `DB_PORT=3306`、`DB_USER=root`），会覆盖默认配置导致连不上库，
+> 请 `unset DB_PORT DB_USER DB_NAME DB_PASSWORD DB_HOST` 或使用 `.env`。
+
+## 账号与权限
+
+| 角色 | 可以做什么 |
+|------|-----------|
+| 只读成员 `viewer` | 经营分析、SQL 查询、知识问答、浏览/搜索 Wiki；只能看到自己的分析历史 |
+| 编辑 `editor` | 以上全部 + 上传文档、新建/编辑 Wiki 页面、恢复历史版本、导入 CSV |
+| 管理员 `admin` | 以上全部 + 删除页面和数据表、用户管理、审计日志、系统状态、重建索引、查看所有人的分析历史 |
+
+## 安全设计
 
 | 层级 | 位置 | 作用 |
 |------|------|------|
 | 1 | `llm_service.py` System Prompt | 约束模型只生成单条 SELECT |
-| 2 | `sql_guard.py` | 屏蔽字符串字面量后做语法骨架扫描：仅放行 SELECT/WITH/EXPLAIN，拦截 DDL/DML、`SELECT INTO`、`COPY`、`pg_sleep`、`pg_read_file`、`dblink`、语句堆叠等 |
-| 3 | `database.execute_readonly_sql` | `READ ONLY` 事务 + `statement_timeout` + 返回行数上限，即使前两层被绕过数据库也拒绝写入 |
+| 2 | `sql_guard.py` | 屏蔽字面量后扫描 SQL 骨架：仅放行 SELECT/WITH/EXPLAIN，拦截 DDL/DML、`SELECT INTO`、`COPY`、`pg_sleep`、`pg_read_file`、`dblink`、语句堆叠 |
+| 3 | `database.execute_readonly_sql` | `READ ONLY` 事务 + `statement_timeout` + 行数上限 |
+| 4 | 数据库角色 `nl2sql_reader` | LLM / Agent SQL 以只读角色执行，只对业务表有 SELECT 权限，读不到账号、审计、知识库等系统表 |
 
-CSV 导入侧：列类型（含用户手动覆盖）必须命中白名单，表名/列名按 PostgreSQL 63 字节上限截断，
-覆盖导入的「删旧表 → 建表 → 写入」在同一事务内完成，失败整体回滚。
+其他：
+- 密码 scrypt 哈希；会话 token 只存哈希、可过期、停用/改密后立即吊销；连续 5 次密码错误锁定 15 分钟
+- 上传文件类型白名单 + 大小上限 + sha256 去重；Markdown 渲染经 DOMPurify 清洗
+- CSV 导入列类型白名单（防 DDL 注入）、标识符按 63 字节截断、覆盖导入单事务回滚
+- 登录、上传、编辑、删除、导入、问答、用户变更全部写入审计日志
 
-`/api/query` 在 SQL 执行报错时，会把报错回传给 LLM 自动修正（次数由 `LLM_SQL_REPAIR_ATTEMPTS` 控制，默认 1 次）。
+## API
 
-## 推荐问题
-
-在“分析 Agent”模式下可以直接问：
-
-- 本月销售额为什么下降？
-- 哪些地区拖累了整体利润？
-- 哪些渠道 ROI 变差？
-- 哪些商品退款率异常升高？
-- 华北区域高价值用户最近购买情况怎么样？
-- 2026年5月销售额怎么样？（问题中写明月份时，按该月 vs 上一月分析；否则自动取数据中的最新月份）
-
-## API 示例
-
-健康检查：
+完整接口文档：`http://localhost:8000/api/docs`。除 `/api/health` 与 `/api/auth/login` 外，所有接口需要请求头 `Authorization: Bearer <token>`。
 
 ```bash
-curl http://127.0.0.1:8000/api/health
+curl -s -X POST http://127.0.0.1:8000/api/auth/login -H 'Content-Type: application/json' -d '{"username":"admin","password":"<密码>"}'
 ```
 
-数据源信息：
+| 分组 | 主要接口 |
+|------|---------|
+| 认证 | `POST /api/auth/login`、`POST /api/auth/logout`、`GET /api/auth/me`、`POST /api/auth/change-password` |
+| 分析 | `POST /api/analyze`、`POST /api/analyze/table`、`POST /api/query`、`GET /api/analysis/history`、`GET /api/analysis/{run_id}/export` |
+| 数据 | `POST /api/import/csv/preview`、`POST /api/import/csv`、`GET /api/tables`、`DELETE /api/tables/{name}` |
+| 知识库 | `GET /api/wiki/index`、`GET /api/wiki/tree`、`GET /api/wiki/search`、`GET/POST/PUT/DELETE /api/wiki/pages`、`GET /api/wiki/pages/{id}/versions`、`POST /api/kb/documents`、`POST /api/kb/ask` |
+| 管理 | `GET/POST/PATCH /api/admin/users`、`GET /api/admin/audit`、`GET /api/admin/system`、`POST /api/admin/kb/reindex` |
 
-```bash
-curl http://127.0.0.1:8000/api/info
-```
+## 数据模型
 
-Agent 分析：
+经营分析演示数据位于 `backend/init_db.sql`（2026 年 1–6 月模拟电商数据，内置 6 月北京下滑、家电退款率升高、华北抖音转化下降等异常），正式交付客户时可在 `docker-compose.yml` 中去掉该挂载。
 
-```bash
-curl -s -X POST http://127.0.0.1:8000/api/analyze \
-  -H 'Content-Type: application/json' \
-  -d '{"question":"本月销售额为什么下降？","analysis_mode":"auto"}'
-```
-
-CSV 导入表通用分析：
-
-```bash
-curl -s -X POST http://127.0.0.1:8000/api/analyze/table \
-  -H 'Content-Type: application/json' \
-  -d '{"table_name":"csv_students","question":"哪些字段缺失比较严重？","analysis_mode":"auto"}'
-```
-
-查看分析历史：
-
-```bash
-curl -s http://127.0.0.1:8000/api/analysis/history
-```
-
-导出报告，把命令中的 `RUN_ID` 替换为分析结果里的 `run_id`：
-
-```bash
-curl -L 'http://127.0.0.1:8000/api/analysis/RUN_ID/export?format=markdown'
-curl -L 'http://127.0.0.1:8000/api/analysis/RUN_ID/export?format=html'
-```
-
-CSV 自动识别：
-
-```bash
-curl -s -F file=@sample_data/example_students.csv \
-  http://127.0.0.1:8000/api/import/csv/preview
-```
-
-CSV 导入：
-
-```bash
-curl -s -F file=@sample_data/example_students.csv \
-  -F table_name=students \
-  -F primary_key_column=学号 \
-  -F overwrite=true \
-  http://127.0.0.1:8000/api/import/csv
-```
+系统表（`users`、`auth_sessions`、`audit_logs`、`wiki_*`、`kb_*`、`agent_runs`）由迁移创建，不暴露给 LLM 和数据表列表。
 
 ## 架构
 
 ```text
-React/Vite Frontend
-        |
-        v
-FastAPI Backend
-        |
-        |-- /api/query     -> LLM NL2SQL -> SQL Guard -> PostgreSQL
-        |-- /api/analyze   -> LangGraph Agent Workflow
-        |-- /api/analyze/table -> CSV Schema Profile -> Generic SQL -> Report
-        |-- /api/import/*  -> CSV Parser/Profile/Importer
-        |
-        v
-PostgreSQL 16
+React / Vite 前端（Nginx）
+        │  /api
+        ▼
+FastAPI 后端 ── auth / audit ── 角色鉴权、审计日志
+        ├── /api/analyze        LangGraph 经营分析 Agent ──┐
+        ├── /api/analyze/table  CSV 通用分析 Agent          │ 只读角色 + READ ONLY 事务
+        ├── /api/query          LLM NL2SQL + SQL Guard ─────┘
+        ├── /api/wiki, /api/kb  Wiki、文档入库、混合检索、RAG 问答
+        └── migrations          启动时自动迁移
+        │
+        ▼
+PostgreSQL 16 + pgvector          Ollama (bge-m3) / 云端 Embedding        DeepSeek / Anthropic 兼容 LLM
 ```
-
-LangGraph 节点：
-
-```text
-Planner -> Knowledge -> SQL -> Executor -> Analysis -> Attribution -> Visualization -> Report
-```
-
-## 当前阶段
-
-已完成：
-
-- Phase 1：PostgreSQL 迁移与现有功能保活
-- Phase 2：企业经营分析数据模型
-- Phase 3：LangGraph 分析工作流
-- Phase 4 基础版：归因分析结果前后端展示
-- CSV 自动识别基础版
-- CSV 通用分析 Agent：导入表字段识别、趋势/分组/缺失/异常分析
-- 分析历史基础版：内存记录最近分析，可在前端回看
-- 报告导出基础版：Markdown / HTML
-
-后续建议：
-
-- 增强 RAG：把 `knowledge_chunks` 升级为 pgvector 检索
-- 支持 Excel 文件导入
-- 增加分析历史持久化表（当前为进程内有界存储，默认保留最近 100 条）
-- 经营分析 Agent 目前是确定性模板（可复现、可审计）；可选地引入 LLM 做规划和报告措辞，模板 SQL 作为兜底
-- 增加前端 E2E 测试和截图验证
 
 ## 自动化测试
 
 ```bash
-.venv/bin/pip install -r backend/requirements-dev.txt
 .venv/bin/python -m pytest backend/tests -q
 ```
 
-- `test_sql_guard.py` / `test_csv_importer.py`：纯函数单元测试，无需数据库
-- `test_api.py`：API 集成测试，需要 `docker compose up -d`；LLM 调用全部 mock，不消耗额度。数据库不可用时自动跳过
+```bash
+cd frontend && npm run lint && npm run build
+```
 
-## 当前 Demo 边界
+- `test_sql_guard.py` / `test_csv_importer.py` / `test_kb_units.py`：纯函数单元测试，无需数据库
+- `test_api.py` / `test_kb_auth.py`：API 集成测试，需要 PostgreSQL（含 pgvector）；LLM 与 Embedding 默认关闭/mock，不消耗额度。数据库不可用时自动跳过
+- 测试会在数据库中创建 `test_*` 用户和临时页面，建议使用独立的测试库（设置 `DB_PORT` / `DB_NAME` 指向测试库）
 
-系统现在有两类 Agent：
+## 后续规划
 
-- 内置经营分析 Agent：基于模拟企业数据仓库，适合展示完整业务归因。
-- CSV 通用分析 Agent：基于上传表自动识别字段，适合真实 CSV 的趋势、分组、缺失、异常和结构画像分析。
-
-CSV 通用分析不会伪装成完整业务专家。如果字段不足以回答严格的“为什么”，报告会说明证据不足，并给出可继续补充的字段方向。
+- 扫描件 PDF 的 OCR、Excel / PPT 导入
+- 部门级空间权限（页面 ACL）、企业 SSO（LDAP / OIDC）
+- Rerank 模型（bge-reranker）进一步提升检索精度
+- 经营分析 Agent 引入 LLM 做规划与报告措辞，模板 SQL 作为可审计兜底

@@ -8,7 +8,11 @@
 cd frontend && npm run lint && npm run build
 ```
 
-API 集成测试需要 PostgreSQL 已启动；未启动时会自动跳过（显示为 skipped）。
+API 集成测试需要 PostgreSQL（pgvector 镜像）已启动；未启动时会自动跳过（显示为 skipped）。
+测试会自动执行数据库迁移、创建管理员（默认 admin / Admin12345，可用 `ADMIN_PASSWORD` 覆盖）和 `test_*` 用户，建议指向独立测试库。
+
+> v2.0 起除 `/api/health`、`/api/auth/login` 外的接口都需要登录，下文的 curl 示例需要加上
+> `-H "Authorization: Bearer $TOKEN"`，TOKEN 从 `POST /api/auth/login` 获取。
 
 ## 1. 启动服务
 

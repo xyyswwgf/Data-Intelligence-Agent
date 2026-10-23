@@ -15,7 +15,14 @@ from typing import Any
 from sqlalchemy import create_engine, text
 from sqlalchemy.engine import Connection
 
-from backend.config import DATABASE_URL, QUERY_MAX_ROWS, QUERY_TIMEOUT_MS, SYSTEM_TABLE_PREFIXES
+from backend.config import (
+    DATABASE_URL,
+    QUERY_MAX_ROWS,
+    QUERY_TIMEOUT_MS,
+    SQL_READER_ROLE,
+    SYSTEM_TABLE_PREFIXES,
+    SYSTEM_TABLES,
+)
 
 
 engine = create_engine(
@@ -49,7 +56,7 @@ def truncate_identifier(identifier: str, max_bytes: int = PG_MAX_IDENTIFIER_BYTE
 
 
 def is_system_table(table_name: str) -> bool:
-    return table_name.startswith(SYSTEM_TABLE_PREFIXES)
+    return table_name in SYSTEM_TABLES or table_name.startswith(SYSTEM_TABLE_PREFIXES)
 
 
 def _json_value(value: Any) -> Any:
@@ -180,6 +187,7 @@ def execute_readonly_sql(
     执行不可信 SQL（LLM 生成 / Agent 生成）的唯一入口 —— 纵深防御第三层。
 
     - READ ONLY 事务：即使 sql_guard 被绕过，数据库也会拒绝任何写操作
+    - SET LOCAL ROLE：切换到只读角色，只能读业务表，读不到 users / audit_logs / wiki_* 等系统表
     - statement_timeout：防止笛卡尔积、pg_sleep 类慢查询拖垮数据库
     - 行数上限：防止一次返回百万行把后端和浏览器撑爆
     - 直接走 DBAPI 游标且不传参数，SQL 中的 '%'、':name' 等字面量不会被当成占位符
@@ -188,6 +196,8 @@ def execute_readonly_sql(
         with conn.begin():
             conn.execute(text("SET TRANSACTION READ ONLY"))
             conn.execute(text(f"SET LOCAL statement_timeout = {int(timeout_ms)}"))
+            if SQL_READER_ROLE:
+                conn.execute(text(f"SET LOCAL ROLE {quote_identifier(SQL_READER_ROLE)}"))
             cursor = conn.connection.driver_connection.cursor()
             try:
                 cursor.execute(sql)

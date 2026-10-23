@@ -1,0 +1,18 @@
+# 构建上下文只需要源码，排除依赖、构建产物、数据和本地配置
+.git
+.claude
+.idea
+.vscode
+.venv
+**/__pycache__
+**/*.pyc
+**/node_modules
+frontend/dist
+data
+backups
+*.csv
+*.xlsx
+*.pptx
+.env
+.env.*
+!.env.example

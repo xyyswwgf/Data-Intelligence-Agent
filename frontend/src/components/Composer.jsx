@@ -31,7 +31,9 @@ export default function Composer({ onSubmit, loading, mode, onModeChange, target
     }
   };
 
-  const placeholder = targetTable
+  const placeholder = mode === "kb"
+    ? "向企业知识库提问，例如：GMV 的统计口径是什么？"
+    : targetTable && mode === "agent"
     ? `针对 ${targetTable} 提问，例如：这个表按月份有什么变化？`
     : mode === "agent"
       ? "描述你的业务问题，例如：本月销售额为什么下降？"
@@ -68,6 +70,16 @@ export default function Composer({ onSubmit, loading, mode, onModeChange, target
               disabled={loading}
             >
               <Icon name="sparkles" size={14} /> Agent 分析
+            </button>
+            <button
+              type="button"
+              role="tab"
+              aria-selected={mode === "kb"}
+              className={mode === "kb" ? "active" : ""}
+              onClick={() => onModeChange("kb")}
+              disabled={loading}
+            >
+              <Icon name="book" size={14} /> 知识问答
             </button>
             <button
               type="button"

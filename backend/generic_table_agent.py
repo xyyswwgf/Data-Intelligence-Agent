@@ -51,7 +51,7 @@ _COUNT_WORDS = ("数量", "多少", "人数", "几个", "几条", "次数", "频
 _PERIOD_TOKENS = ("日期", "时间", "月份", "年月", "周期")
 
 
-def run_table_analysis(question: str, table_name: str, analysis_mode: str = "auto") -> dict[str, Any]:
+def run_table_analysis(question: str, table_name: str, analysis_mode: str = "auto", user_id: int | None = None) -> dict[str, Any]:
     if not table_name.startswith("csv_"):
         raise PermissionError("只允许分析 csv_ 前缀的导入表。")
     if not table_exists(table_name):
@@ -103,7 +103,7 @@ def run_table_analysis(question: str, table_name: str, analysis_mode: str = "aut
         "report": state.get("report", {}),
         "errors": state.get("errors", []),
     }
-    save_analysis_result(response)
+    save_analysis_result(response, user_id)
     return response
 
 
