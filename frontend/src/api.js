@@ -189,6 +189,7 @@ export async function previewCsv(file, options = {}) {
   if (options.dataStartRow) formData.append("data_start_row", String(options.dataStartRow));
   if (options.combineHeaders) formData.append("combine_headers", String(options.combineHeaders));
   if (options.skipTrailing !== undefined) formData.append("skip_trailing", String(options.skipTrailing));
+  if (options.sheetName) formData.append("sheet_name", options.sheetName);
   const response = await apiClient.post("/api/import/csv/preview", formData, {
     headers: { "Content-Type": "multipart/form-data" },
     timeout: 30000,
@@ -236,6 +237,7 @@ export async function importCsv(file, options = {}) {
   if (options.dataStartRow) formData.append("data_start_row", String(options.dataStartRow));
   if (options.combineHeaders) formData.append("combine_headers", String(options.combineHeaders));
   if (options.skipTrailing) formData.append("skip_trailing", String(options.skipTrailing));
+  if (options.sheetName) formData.append("sheet_name", options.sheetName);
   const response = await apiClient.post("/api/import/csv", formData, {
     headers: { "Content-Type": "multipart/form-data" },
     timeout: 120000,
@@ -382,6 +384,19 @@ export async function uploadKnowledgeDocument(file, { parentId, tags } = {}) {
     await apiClient.post("/api/kb/documents", formData, {
       headers: { "Content-Type": "multipart/form-data" },
       timeout: 300000,
+    })
+  ).data;
+}
+
+// 门店数据：销售台账、收款明细、ERP、库龄表、指导书。dryRun 只识别不写入
+export async function importStoreData(files, { dryRun = false } = {}) {
+  const formData = new FormData();
+  files.forEach((file) => formData.append("files", file));
+  formData.append("dry_run", dryRun ? "true" : "false");
+  return (
+    await apiClient.post("/api/store-data/import", formData, {
+      headers: { "Content-Type": "multipart/form-data" },
+      timeout: 600000,
     })
   ).data;
 }

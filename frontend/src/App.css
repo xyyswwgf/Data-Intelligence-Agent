@@ -3307,6 +3307,41 @@ button.tag-chip:hover,
   margin-top: 12px;
 }
 
+.store-data-dialog {
+  width: min(760px, 100%);
+}
+
+.store-data-dialog .upload-name {
+  max-width: 38%;
+}
+
+.store-data-dialog .upload-status strong {
+  color: var(--text);
+  font-weight: 600;
+}
+
+.store-data-dialog .callout {
+  margin-top: 12px;
+}
+
+.icon-btn.small {
+  width: 26px;
+  height: 26px;
+  border-radius: 8px;
+}
+
+.callout.warn {
+  background: var(--warning-soft);
+  color: var(--warning);
+}
+
+.store-notes {
+  margin: 0;
+  padding-left: 16px;
+  max-height: 140px;
+  overflow-y: auto;
+}
+
 .upload-list {
   margin: 12px 0 0;
   padding: 0;
@@ -4542,4 +4577,54 @@ button.tag-chip:hover,
     bottom: 120px;
     width: auto;
   }
+}
+
+/* v5：Excel 工作表选择、Python 分析展示 */
+
+.sheet-picker {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  padding: 2px 4px 2px 10px;
+  border-radius: 999px;
+  background: var(--primary-soft);
+  color: var(--primary-ink);
+}
+
+.sheet-picker select {
+  padding: 1px 6px;
+  border: none;
+  border-radius: 999px;
+  background: var(--surface);
+  font-size: 12px;
+}
+
+.code-details > summary {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  color: var(--text-2);
+  font-size: 12.5px;
+  cursor: pointer;
+}
+
+.code-details pre {
+  margin-top: 8px;
+}
+
+.python-code {
+  color: #c3f7d1;
+}
+
+.stdout-block {
+  margin: 0;
+  padding: 10px 12px;
+  border-radius: var(--radius-sm);
+  background: var(--surface-3);
+  color: var(--text);
+  font-family: var(--mono);
+  font-size: 12px;
+  white-space: pre-wrap;
+  max-height: 260px;
+  overflow: auto;
 }

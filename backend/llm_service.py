@@ -65,10 +65,11 @@ _SYSTEM_PROMPT_TEMPLATE = """你是一个资深的 PostgreSQL SQL 查询专家�
 4. 所有表名和列名用双引号包裹（如 "表名"、"列名"），字符串值用单引号（如 '张三'）。
 5. 聚合查询必须加 GROUP BY，排序用 ORDER BY。
 6. 日期字段使用 DATE 字面量（如 DATE '2026-06-01'），范围用 BETWEEN。
-7. 当前数据覆盖 2026-01-01 到 2026-06-30。用户说“本月”时默认指 2026-06，“上月”默认指 2026-05。
+7. {coverage}
 8. 明细查询（非聚合）默认加 LIMIT 200，除非用户明确要求全部数据。
 9. 结果列使用中文别名（AS "销售额"），方便业务人员阅读。
-10. 订单相关指标只统计有效订单（fact_orders.status = 'paid'）。
+10. 门店口径：销售额 = SUM(sale_price)，毛利 = SUM(gross_profit)，手机台数 = COUNT(*) FILTER (WHERE is_phone)；
+    按门店统计时 JOIN "dim_store" 取 short_name（望京 / 南锣 / 乐堤港 / 阳光）。
 
 ---
 
@@ -104,41 +105,41 @@ _SYSTEM_PROMPT_TEMPLATE = """你是一个资深的 PostgreSQL SQL 查询专家�
 ### 6. 聚合函数 — COUNT / SUM / AVG / MAX / MIN
 - 「总共有多少学生？」→ SELECT COUNT(*) AS "总人数" FROM "students"
 - 「有成绩记录的学生数（去重）」→ SELECT COUNT(DISTINCT "学号") FROM "scores"
-- 「总销售额」→ SELECT SUM("order_amount") AS "总销售额" FROM "fact_orders"
+- 「总销售额」→ SELECT SUM("sale_price") AS "总销售额" FROM "fact_store_sales"
 - 「平均分」→ SELECT AVG("成绩") AS "平均分" FROM "scores"
 
 ### 7. 分组聚合 — GROUP BY
-- 「每个地区的销售额」→ SELECT r."province", SUM(o."order_amount") AS "销售额" FROM "fact_orders" o JOIN "dim_region" r ON o."region_id" = r."region_id" GROUP BY r."province"
-- 「每天的订单数」→ SELECT "order_date", COUNT(*) AS "订单数" FROM "fact_orders" GROUP BY "order_date"
+- 「每个门店的销售额」→ SELECT d."short_name" AS "门店", SUM(s."sale_price") AS "销售额" FROM "fact_store_sales" s JOIN "dim_store" d ON s."store_id" = d."store_id" GROUP BY d."short_name"
+- 「每天卖了多少台手机」→ SELECT "sale_date", COUNT(*) FILTER (WHERE "is_phone") AS "手机台数" FROM "fact_store_sales" GROUP BY "sale_date"
 
 ### 8. 聚合后筛选 — HAVING
-- 「销售额大于1000的商品类别」→ GROUP BY p."category" HAVING SUM(o."order_amount") > 1000
+- 「毛利大于1000的产品线」→ GROUP BY "product_type" HAVING SUM("gross_profit") > 1000
 
 ### 9. 表关联 — JOIN / LEFT JOIN / 多表JOIN
-- 「订单对应的商品名」→ FROM "fact_orders" o JOIN "dim_product" p ON o."product_id" = p."product_id"
-- 「所有商品及其订单（含无订单的商品）」→ FROM "dim_product" p LEFT JOIN "fact_orders" o ON ...
+- 「销售记录对应的门店」→ FROM "fact_store_sales" s JOIN "dim_store" d ON s."store_id" = d."store_id"
+- 「所有门店及其库存（含没有库存的门店）」→ FROM "dim_store" d LEFT JOIN "fact_stock_age" a ON ...
 
 ### 10. 子查询 — WHERE ... IN (SELECT ...) / 派生表
-- 「高于平均值的商品」→ WHERE "order_amount" > (SELECT AVG("order_amount") FROM "fact_orders")
+- 「售价高于平均值的商品」→ WHERE "sale_price" > (SELECT AVG("sale_price") FROM "fact_store_sales")
 - 「每个院系最高分的学生」→ 使用派生表子查询
 
 ### 11. CASE WHEN — 条件分类
 - 「销售额>=10000为高，>=5000为中，否则低」
-  → SELECT CASE WHEN SUM("order_amount")>=10000 THEN '高' WHEN SUM("order_amount")>=5000 THEN '中' ELSE '低' END AS "等级" FROM "fact_orders"
+  → SELECT CASE WHEN SUM("sale_price")>=10000 THEN '高' WHEN SUM("sale_price")>=5000 THEN '中' ELSE '低' END AS "等级" FROM "fact_store_sales"
 
 ### 12. 日期函数 — TO_CHAR / EXTRACT / DATE_TRUNC
-- 「按月统计订单数」→ SELECT TO_CHAR("order_date",'YYYY-MM') AS "月份", COUNT(*) FROM "fact_orders" GROUP BY TO_CHAR("order_date",'YYYY-MM')
-- 「2026年的订单」→ WHERE EXTRACT(YEAR FROM "order_date") = 2026
-- 「5月的订单」→ WHERE EXTRACT(MONTH FROM "order_date") = 5
+- 「按月统计销售额」→ SELECT "month_label" AS "月份", SUM("sale_price") FROM "fact_store_sales" GROUP BY "month_label"
+- 「2026年的销售」→ WHERE EXTRACT(YEAR FROM "sale_date") = 2026
+- 「8月的销售」→ WHERE "month_label" = '2026-08'
 
 ### 13. 字符串函数 — CONCAT / SUBSTRING
-- 「取日期年月」→ SELECT TO_CHAR("order_date", 'YYYY-MM') FROM "fact_orders"
+- 「取日期年月」→ SELECT TO_CHAR("sale_date", 'YYYY-MM') FROM "fact_store_sales"
 
 ### 14. 数值函数 — ROUND / FLOOR / CEIL
-- 「平均客单价保留2位小数」→ SELECT ROUND(AVG("order_amount"), 2) AS "平均客单价" FROM "fact_orders"
+- 「平均售价保留2位小数」→ SELECT ROUND(AVG("sale_price"), 2) AS "平均售价" FROM "fact_store_sales"
 
 ### 15. 序号/排名 — ROW_NUMBER / RANK（PostgreSQL 窗口函数）
-- 「每个地区销售额排名」→ SELECT r."province", SUM(o."order_amount") AS "销售额", RANK() OVER (ORDER BY SUM(o."order_amount") DESC) AS "排名" FROM "fact_orders" o JOIN "dim_region" r ON o."region_id"=r."region_id" GROUP BY r."province"
+- 「店员毛利排名」→ SELECT "salesperson", SUM("gross_profit") AS "毛利", RANK() OVER (ORDER BY SUM("gross_profit") DESC) AS "排名" FROM "fact_store_sales" GROUP BY "salesperson"
 
 ### 16. UNION 合并
 - 「两个表里都出现过的客户」→ SELECT "customer_id" FROM "表A" UNION SELECT "customer_id" FROM "表B"
@@ -181,8 +182,8 @@ def _extract_sql_from_response(raw_text: str) -> str:
     从 LLM 原始输出中提取纯净的 SQL 语句
 
     处理以下情况:
-      - 裸 SQL: "SELECT * FROM fact_orders"
-      - Markdown 包裹: "```sql\nSELECT * FROM fact_orders\n```"
+      - 裸 SQL: "SELECT * FROM fact_store_sales"
+      - Markdown 包裹: "```sql\nSELECT * FROM fact_store_sales\n```"
       - 多行: "```\nSELECT ...\n```"
     """
     text = raw_text.strip()
@@ -205,6 +206,20 @@ def _extract_sql_from_response(raw_text: str) -> str:
 # ---------------------------------------------------------------------------
 
 
+def _coverage_hint() -> str:
+    """数据的实际时间范围（业务数据不一定更新到今天）。"""
+    try:
+        from backend.database import execute_sql
+
+        row = execute_sql("SELECT MIN(sale_date)::text, MAX(sale_date)::text, MAX(month_label) FROM fact_store_sales")["data"][0]
+    except Exception:
+        row = None
+    if not row or not row[0]:
+        return "数据的时间范围以表中实际数据为准。"
+    return (f"门店销售数据覆盖 {row[0]} 到 {row[1]}。用户说「本月」时默认指 {row[2]}（数据中最新的月份），"
+            "「上月」指它的前一个月。")
+
+
 def generate_sql(question: str, failed_sql: str | None = None, error: str | None = None,
                  provider: Provider | None = None) -> str:
     """
@@ -214,7 +229,7 @@ def generate_sql(question: str, failed_sql: str | None = None, error: str | None
 
     参数:
         question:   用户的自然语言问题
-                    示例: "每种商品类别的总销售额是多少？"
+                    示例: "每个门店本月的毛利是多少？"
         failed_sql: （可选）上一次执行失败的 SQL，用于自我修正
         error:      （可选）上一次执行的数据库报错
 
@@ -235,7 +250,7 @@ def generate_sql(question: str, failed_sql: str | None = None, error: str | None
         )
 
     # 1. 动态获取最新的数据库 DDL（元数据外挂）
-    system_prompt = _SYSTEM_PROMPT_TEMPLATE.format(ddl=get_ddl())
+    system_prompt = _SYSTEM_PROMPT_TEMPLATE.format(ddl=get_ddl(), coverage=_coverage_hint())
 
     # 2. 组装用户消息（首次生成 / 基于报错修正）
     if failed_sql and error:
@@ -262,7 +277,7 @@ def generate_sql(question: str, failed_sql: str | None = None, error: str | None
     if sql.upper().strip().rstrip(".。") == "UNANSWERABLE":
         raise ValueError(
             "您的问题无法转换为 SQL 查询，请尝试更具体的数据分析问题。"
-            "例如：'每种商品类别的销售额' 或 '每天的订单数趋势'。"
+            "例如：'每个门店本月的销售额和毛利' 或 '各产品线的毛利排名'。"
         )
 
     return sql

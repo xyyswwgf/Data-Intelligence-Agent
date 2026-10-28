@@ -6,6 +6,7 @@ import WikiPage from "./WikiPage";
 import WikiEditor from "./WikiEditor";
 import VersionHistory from "./VersionHistory";
 import UploadDialog from "./UploadDialog";
+import StoreDataDialog from "./StoreDataDialog";
 import {
   createWikiPage,
   deleteWikiPage,
@@ -36,6 +37,7 @@ export default function WikiView({ slug, user, onNavigate, onAsk }) {
   const [saveError, setSaveError] = useState(null);
   const [historyOpen, setHistoryOpen] = useState(false);
   const [uploadOpen, setUploadOpen] = useState(false);
+  const [storeDataFiles, setStoreDataFiles] = useState(null); // 非 null 时打开门店数据导入
   const [query, setQuery] = useState("");
   const [results, setResults] = useState(null);
 
@@ -248,6 +250,7 @@ export default function WikiView({ slug, user, onNavigate, onAsk }) {
           <div className="wiki-nav-actions">
             <button type="button" className="ghost-btn" onClick={() => startCreate()}><Icon name="plus" size={14} /> 新建页面</button>
             <button type="button" className="ghost-btn" onClick={() => setUploadOpen(true)}><Icon name="upload" size={14} /> 上传文档</button>
+            <button type="button" className="ghost-btn" onClick={() => setStoreDataFiles([])}><Icon name="database" size={14} /> 导入门店数据</button>
           </div>
         )}
         <div className="side-label">页面目录</div>
@@ -265,6 +268,15 @@ export default function WikiView({ slug, user, onNavigate, onAsk }) {
           onClose={() => setUploadOpen(false)}
           onDone={refresh}
           onOpen={(target) => { setUploadOpen(false); open(target); }}
+          onStoreData={(files) => { setUploadOpen(false); setStoreDataFiles(files); }}
+        />
+      )}
+      {storeDataFiles && (
+        <StoreDataDialog
+          initialFiles={storeDataFiles}
+          onClose={() => setStoreDataFiles(null)}
+          onDone={refresh}
+          onOpen={(target) => { setStoreDataFiles(null); open(target); }}
         />
       )}
     </div>

@@ -109,12 +109,12 @@ function ToolForm({ initial, onSaved, onCancel }) {
         <label>工具标识
           <input value={form.name} onChange={set("name")} disabled={editing} required pattern="[a-z][a-z0-9_]{2,40}" placeholder="gmv_by_province" title="小写字母开头，可含数字和下划线" />
         </label>
-        <label>显示名称<input value={form.display_name} onChange={set("display_name")} required maxLength={100} placeholder="省份月度 GMV" /></label>
+        <label>显示名称<input value={form.display_name} onChange={set("display_name")} required maxLength={100} placeholder="门店月度毛利" /></label>
         <label>可使用的角色
           <select value={form.min_role} onChange={set("min_role")}>{Object.entries(ROLE_LABEL).map(([k, v]) => <option key={k} value={k}>{v}</option>)}</select>
         </label>
         <label className="span-3">用途说明（模型据此判断何时调用，写清输入输出）
-          <textarea rows={2} value={form.description} onChange={set("description")} required minLength={5} placeholder="查询指定月份各省份的 GMV 排名，返回省份与 GMV（万元）。" />
+          <textarea rows={2} value={form.description} onChange={set("description")} required minLength={5} placeholder="查询指定月份各门店的销售额和毛利，返回门店、销售额、毛利（元）。" />
         </label>
       </div>
       <div className="form-block">
@@ -125,7 +125,7 @@ function ToolForm({ initial, onSaved, onCancel }) {
         <div className="form-grid">
           <label className="span-3">SQL 模板（用 :参数名 引用参数；只允许 SELECT，执行时走只读账号）
             <textarea className="code-input" rows={6} value={form.sql} onChange={set("sql")} required
-              placeholder={"SELECT r.province, SUM(o.order_amount) AS gmv\nFROM fact_orders o JOIN dim_region r ON r.region_id = o.region_id\nJOIN dim_date d ON d.date_id = o.order_date\nWHERE d.month_label = :month GROUP BY 1 ORDER BY 2 DESC"} />
+              placeholder={"SELECT d.short_name AS 门店, SUM(s.sale_price) AS 销售额, SUM(s.gross_profit) AS 毛利\nFROM fact_store_sales s JOIN dim_store d ON d.store_id = s.store_id\nWHERE s.month_label = :month GROUP BY 1 ORDER BY 3 DESC"} />
           </label>
           <label>最多返回行数<input type="number" min={1} max={2000} value={form.max_rows} onChange={set("max_rows")} /></label>
         </div>

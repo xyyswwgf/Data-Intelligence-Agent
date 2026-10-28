@@ -8,24 +8,51 @@ os.environ["KB_INDEX_ASYNC"] = "false"  # 索引同步执行，测试结果可�
 os.environ.setdefault("EMBEDDING_PROVIDER", "none")  # 默认不依赖外部 Embedding 服务
 os.environ.setdefault("KB_STORAGE_DIR", tempfile.mkdtemp(prefix="kb_test_"))
 
+# 测试使用独立的数据库（<DB_NAME>_test），写入虚构样例数据，不触碰开发库里的真实门店数据。
+# 显式设置 DATABASE_URL 时按其执行（CI 等场景自行准备数据库）。
+if not os.getenv("DATABASE_URL"):
+    os.environ["DB_NAME"] = os.getenv("TEST_DB_NAME") or f"{os.getenv('DB_NAME', 'data_agent_db')}_test"
+
 import pytest  # noqa: E402
 from sqlalchemy import text  # noqa: E402
 
 
-def _db_available() -> bool:
-    try:
-        from backend.database import engine
+def _ensure_database() -> None:
+    """测试库不存在时创建（连接同一实例的 postgres 库执行 CREATE DATABASE）。"""
+    from sqlalchemy import create_engine
+    from sqlalchemy.engine import make_url
 
-        with engine.connect() as conn:
-            conn.execute(text("SELECT 1 FROM fact_orders LIMIT 1"))
+    from backend.config import DATABASE_URL
+
+    url = make_url(DATABASE_URL)
+    admin = create_engine(url.set(database="postgres"), isolation_level="AUTOCOMMIT")
+    with admin.connect() as conn:
+        exists = conn.execute(text("SELECT 1 FROM pg_database WHERE datname = :n"), {"n": url.database}).first()
+        if not exists:
+            conn.execute(text(f'CREATE DATABASE "{url.database}"'))
+    admin.dispose()
+
+
+def _prepare() -> bool:
+    try:
+        if not os.getenv("DATABASE_URL"):
+            _ensure_database()
+        from backend.database import get_connection
+        from backend.migrations import run_migrations
+        from backend.store_data.sample import load_sample
+
+        run_migrations()
+        with get_connection() as conn:
+            load_sample(conn)
         return True
-    except Exception:
+    except Exception as exc:  # 数据库不可用时，依赖数据库的用例自动跳过
+        print(f"测试数据库不可用：{exc}")
         return False
 
 
-DB_AVAILABLE = _db_available()
+DB_AVAILABLE = _prepare()
 
-requires_db = pytest.mark.skipif(not DB_AVAILABLE, reason="PostgreSQL 未启动或未初始化（docker compose up -d）")
+requires_db = pytest.mark.skipif(not DB_AVAILABLE, reason="PostgreSQL 未启动（docker compose up -d postgres）")
 
 
 @pytest.fixture(scope="session")

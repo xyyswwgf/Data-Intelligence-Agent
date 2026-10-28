@@ -284,7 +284,7 @@ _BUILTIN_TOOLS = [
     ("list_tables", "查看数据表", "列出可查询的业务数据表"),
     ("describe_tables", "读取表结构", "查看数据表的字段定义"),
     ("run_sql", "执行 SQL", "在只读环境执行 SELECT 查询"),
-    ("business_analysis", "经营归因分析", "内置经营数据的完整归因分析"),
+    ("business_analysis", "门店经营分析", "各门店销售、毛利、任务达成、产品线与库龄分析"),
     ("analyze_imported_table", "分析导入表", "对 CSV 导入表做趋势、分组、缺失、异常分析"),
     ("remember", "写入记忆", "把用户的长期信息存入记忆"),
     ("use_skill", "加载技能", "按需加载技能的详细指引"),
@@ -297,13 +297,13 @@ _SEED_SKILLS = [
         "用户要写周报、月报、经营汇报材料，或要求「按汇报格式输出」时使用。",
         """# 经营周报写作规范
 
-1. 先调用 business_analysis 获取核心指标和归因结论；需要补充数字时再用 run_sql。
+1. 先调用 business_analysis 获取各门店销售额、毛利、任务达成和产品线结构；需要补充数字时再用 run_sql。
 2. 输出结构固定为：
-   - **一句话结论**（不超过 40 字，包含最关键的变化幅度）
-   - **核心指标表**：指标 / 本期 / 上期 / 环比，金额以万元为单位保留两位小数
-   - **三条主要原因**：每条都要有数据支撑
-   - **下周行动建议**：最多三条，写清负责方向
-3. 口径与知识库保持一致（GMV、净销售额、毛利率）；不确定的口径先调用 search_knowledge。
+   - **一句话结论**（不超过 40 字，包含毛利达成率等最关键的数字）
+   - **门店指标表**：门店 / 销售额 / 毛利 / 毛利率 / 手机台数 / 毛利目标达成率，金额以万元为单位保留两位小数
+   - **三条主要原因**：每条都要有数据支撑（产品线、店员、库龄、收款方式等）
+   - **下周行动建议**：最多三条，写清负责门店或店员
+3. 口径与知识库保持一致（销售额、毛利、手机台数、回收业务）；产品政策、考核规则先调用 search_knowledge。
 4. 不写空话，每个判断都要对应到数字。""",
         ["business_analysis", "run_sql", "search_knowledge"],
     ),
@@ -397,12 +397,90 @@ def _m005_models_tools_skills(conn: Connection) -> None:
             conn.execute(text(f"REVOKE ALL ON {table} FROM {quote_identifier(SQL_READER_ROLE)}"))
 
 
+def _m006_python_analysis_tool(conn: Connection) -> None:
+    """注册 Python 分析沙箱工具；执行代码风险高于只读 SQL，默认仅编辑及以上角色可用，管理员可调整。"""
+    conn.execute(text("""
+        INSERT INTO agent_tools (name, display_name, description, kind, min_role)
+        VALUES ('python_analysis', 'Python 分析', '在隔离沙箱中用 pandas 处理只读 SQL 取出的数据', 'builtin', 'editor')
+        ON CONFLICT (name) DO NOTHING
+    """))
+
+
+def _m007_store_schema(conn: Connection) -> None:
+    """门店经营数据表（替换旧版电商演示数据），并把内置工具 / 技能的说明改为门店场景。"""
+    from backend.store_data.schema import create_schema
+
+    create_schema(conn)
+    conn.execute(text("""
+        UPDATE agent_tools SET display_name = '门店经营分析',
+               description = '各门店销售、毛利、任务达成、产品线与库龄分析'
+        WHERE name = 'business_analysis' AND display_name = '经营归因分析'
+    """))
+    conn.execute(
+        text("UPDATE agent_skills SET instructions = :new WHERE name = 'weekly-report' AND instructions = :old"),
+        {"new": _SEED_SKILLS[0][3], "old": _DEMO_WEEKLY_REPORT},
+    )
+
+
+# 007 之前内置「经营周报」技能的指引（电商演示口径）；管理员没改过时替换为门店口径
+_DEMO_WEEKLY_REPORT = """# 经营周报写作规范
+
+1. 先调用 business_analysis 获取核心指标和归因结论；需要补充数字时再用 run_sql。
+2. 输出结构固定为：
+   - **一句话结论**（不超过 40 字，包含最关键的变化幅度）
+   - **核心指标表**：指标 / 本期 / 上期 / 环比，金额以万元为单位保留两位小数
+   - **三条主要原因**：每条都要有数据支撑
+   - **下周行动建议**：最多三条，写清负责方向
+3. 口径与知识库保持一致（GMV、净销售额、毛利率）；不确定的口径先调用 search_knowledge。
+4. 不写空话，每个判断都要对应到数字。"""
+
+
+def _m008_store_comments(conn: Connection) -> None:
+    """手机台数改为按商品名称判断：更新表注释（智能助手据此写 SQL），已导入的数据按新规则重算 is_phone。"""
+    from backend.store_data.schema import DDL
+
+    conn.execute(text(DDL))
+    conn.execute(text("""
+        UPDATE fact_store_sales
+        SET is_phone = (product_name LIKE '%全网通%' AND product_name NOT LIKE '%平板%' AND product_name NOT LIKE '%二手%'
+                        AND product_type IS DISTINCT FROM '回收'
+                        AND COALESCE(product_status, '') NOT IN ('系统已调总库', '系统已做批发')
+                        AND COALESCE(sale_price, 0) > 0)
+    """))
+
+
+def _m009_drop_non_retail(conn: Connection) -> None:
+    """调回总库、批发不是门店零售：删除已导入的这些行，销售额、毛利、台数都不再包含（导入程序同样跳过）。"""
+    from backend.store_data.schema import DDL
+
+    conn.execute(text(DDL))
+    conn.execute(text("DELETE FROM fact_store_sales WHERE product_status IN ('系统已调总库', '系统已做批发')"))
+
+
+def _m010_mask_remarks(conn: Connection) -> None:
+    """已导入的备注中可能有顾客手机号、身份证号：按导入时同样的规则打码。"""
+    from backend.store_data.parsers import mask_personal
+
+    for table, key in (("fact_store_sales", "sale_id"), ("fact_payments", "payment_id"), ("fact_purchase_in", "in_id")):
+        if not conn.execute(text("SELECT to_regclass(:t)"), {"t": table}).scalar():
+            continue
+        rows = conn.execute(text(f"SELECT {key}, remark FROM {table} WHERE remark ~ '[0-9]{{11}}'")).all()
+        changed = [{"id": rid, "remark": mask_personal(remark)} for rid, remark in rows if mask_personal(remark) != remark]
+        if changed:
+            conn.execute(text(f"UPDATE {table} SET remark = :remark WHERE {key} = :id"), changed)
+
+
 MIGRATIONS: list[tuple[int, str, Callable[[Connection], None]]] = [
     (1, "core schema: users, audit, wiki, kb, agent_runs", _m001_core_schema),
     (2, "read-only SQL role for LLM/agent queries", _m002_reader_role),
     (3, "seed wiki from demo knowledge_chunks", _m003_seed_wiki),
     (4, "chat sessions, messages and user memories", _m004_conversations_and_memory),
     (5, "model profiles, managed tools and skills", _m005_models_tools_skills),
+    (6, "python analysis sandbox tool", _m006_python_analysis_tool),
+    (7, "store business schema replaces ecommerce demo", _m007_store_schema),
+    (8, "phone count by product name", _m008_store_comments),
+    (9, "exclude transfers and wholesale from store sales", _m009_drop_non_retail),
+    (10, "mask phone and id numbers in remarks", _m010_mask_remarks),
 ]
 
 

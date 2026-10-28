@@ -22,12 +22,12 @@ DeepSeek 开源的 DeepInfer 是 **GPU 推理服务引擎**（与 vLLM 同类：
 | 机制 | 说明 |
 |------|------|
 | 统一 LLM 网关 | `llm_gateway.py`：Anthropic / OpenAI 两种协议，原生推理内容统一解析为 `reasoning` |
-| 工具 | 检索知识库、列出数据表、读取表结构、执行只读 SQL、经营归因分析、CSV 表分析、写入记忆 |
+| 工具 | 检索知识库、列出数据表、读取表结构、执行只读 SQL、Python 分析（沙箱）、门店经营分析、CSV 表分析、写入记忆 |
 | 自我修正 | 工具报错（SQL 列名写错等）原文回传给模型，由模型修正后重试；重复调用直接跳过 |
 | 步数上限 | 达到上限后最后一轮不再提供工具，强制基于已有证据作答并说明缺口 |
 | 安全边界不变 | SQL 仍经过 sql_guard + 只读角色 + READ ONLY 事务；工具结果超长时截断再进上下文 |
 | 事件流 | SSE 实时推送 context / thinking / tool_call / tool_result / done，前端展示推理轨迹 |
-| 无模型降级 | 未配置 LLM 时按规则路由到经营分析 / CSV 分析 / 知识检索，平台不中断 |
+| 无模型降级 | 未配置 LLM 时按规则路由到门店经营分析 / CSV 分析 / 知识检索，平台不中断 |
 
 ## 3. 记忆分层（借鉴 Letta / MemGPT 分层记忆、Mem0 自动抽取）
 
@@ -66,12 +66,28 @@ DeepSeek 开源的 DeepInfer 是 **GPU 推理服务引擎**（与 vLLM 同类：
 
 | 类型 | 说明 |
 |------|------|
-| 内置工具 | 知识库检索、表结构、只读 SQL、经营归因、CSV 分析、记忆、加载技能；可停用、可设置最低使用角色 |
+| 内置工具 | 知识库检索、表结构、只读 SQL、Python 分析、门店经营分析、CSV 分析、记忆、加载技能；可停用、可设置最低使用角色 |
 | SQL 模板 | 把常用口径固化成参数化查询（`:month` 引用参数）。保存时经 sql_guard 校验，参数由数据库驱动绑定（注入无效），执行仍走只读角色 |
 | HTTP 接口 | 接入 CRM、工单、库存等系统。URL 由管理员固定，模型只能填参数（路径参数 URL 编码）；凭证头加密存储；默认禁止访问内网地址，需要时用 `TOOL_HTTP_ALLOWED_HOSTS` 放行；响应可按 `response_path` 只取有用字段 |
 
 参数用简化的 JSON Schema（文本 / 整数 / 数字 / 是否，可设可选值和必填），模型给出的参数在执行前校验并转换类型，
-错误信息回传给模型修正。每个工具都可以在管理页填参数直接试运行。出于安全考虑不支持执行任意代码。
+错误信息回传给模型修正。每个工具都可以在管理页填参数直接试运行。自定义工具不支持执行任意代码；唯一能运行代码的是内置的 Python 分析沙箱（见下）。
+
+**Python 分析沙箱**（`python_analysis`，`backend/assistant/python_sandbox.py` + `sandbox_runner.py`，默认最低角色 editor）
+
+模型给出 `sql` 和 `code`：SQL 走与 `run_sql` 相同的安全网关取数，结果加载为 DataFrame `df`，代码把结果赋值给 `result`，可选 `chart` 指定图表。防护分层，任何一层失效其余层仍然生效：
+
+| 层 | 机制 |
+|----|------|
+| 数据来源 | 代码本身不接触数据库，只能处理只读 SQL 取出的数据（`PYTHON_SANDBOX_MAX_ROWS` 行上限） |
+| 静态校验 | AST 检查：import 只允许 pandas / numpy / math / statistics / datetime / re / collections / itertools / functools / json 的顶层模块（子模块如 `pandas.io` 带文件读写，一律禁止）；禁止下划线属性、eval / exec / open / getattr / type 等内置函数、`read_*` 与写文件类 `to_*`、`eval` / `query`、numpy 文件读写、`str.format`、global / nonlocal |
+| 进程隔离 | `python -I` 独立子进程、空环境变量（拿不到数据库密码和 API Key）、临时工作目录、RLIMIT_CPU / RLIMIT_AS / RLIMIT_FSIZE=0、墙钟超时 |
+| 运行时屏蔽 | 子进程内替换 socket、subprocess 与 os 的进程 / 文件操作函数，`__import__` 只放行白名单，内置函数受限 |
+| 输出 | 只返回 `result`（表格最多 500 行）、`chart` 和截断后的打印输出 |
+
+代码校验或执行失败时，错误连同 `df` 的列名和样例行一起回传给模型，引导它直接对 `df` 计算而不是重新读数据。
+
+与早期版本相比：不再把列名拼接进代码模板执行（列名可构造为注入代码），也不提供跳过校验的本地执行模式。
 
 **技能**（「系统管理 → 技能」，`agent_skills`，借鉴 Anthropic Agent Skills 的渐进式加载）
 
@@ -92,6 +108,9 @@ DeepSeek 开源的 DeepInfer 是 **GPU 推理服务引擎**（与 vLLM 同类：
 | `AGENT_MAX_STEPS` | 单轮最多工具调用步数，默认 8 |
 | `MEMORY_ENABLED` / `MEMORY_RECALL_K` | 全局记忆开关、每轮召回条数 |
 | `CONTEXT_COMPACT_RATIO` / `CONTEXT_KEEP_RECENT` | 会话压缩阈值、压缩时保留的最近消息数 |
+| `PYTHON_SANDBOX_ENABLED` | Python 分析沙箱开关，默认开启 |
+| `PYTHON_SANDBOX_TIMEOUT_SECONDS` / `PYTHON_SANDBOX_MEMORY_MB` | 单次执行的 CPU 时间（默认 20 秒）与内存上限（默认 1024MB） |
+| `PYTHON_SANDBOX_MAX_ROWS` | 加载进 DataFrame 的最大行数，默认 50000 |
 
 本地验证用 Ollama 的 `qwen3.5:4b`（支持工具调用和推理）：
 

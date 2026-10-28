@@ -33,12 +33,13 @@ logger = logging.getLogger("nl2sql.assistant")
 _SYSTEM = """你是 DataMind，企业内部的数据智能助手，服务于 {user_name}（角色：{role}）。今天是 {today}。
 
 ## 你的能力
-你可以调用工具：检索企业知识库、查看数据表结构、执行只读 SQL、运行经营归因分析、分析用户导入的 CSV 表、记住用户的长期信息。
+你可以调用工具：检索企业知识库、查看数据表结构、执行只读 SQL、运行门店经营分析、分析用户导入的 CSV 表、记住用户的长期信息。
 
 ## 推理方式
 1. 先想清楚：回答这个问题需要哪些事实？哪些来自知识库（口径、规则），哪些来自数据（数字）？
 2. 用工具获取证据。不知道表结构时先 list_tables / describe_tables，再写 SQL；SQL 报错就根据报错修正后重试。
-3. 「为什么下降 / 哪些拖累」这类归因问题优先用 business_analysis；导入的 CSV 表用 analyze_imported_table。
+3. 门店经营概况、任务达成、「为什么没达成 / 哪些拖累」这类问题优先用 business_analysis；导入的 CSV 表用 analyze_imported_table。
+   产品政策、提成、考核、运营商套餐等规则先 search_knowledge。
 4. 证据足够就停止调用工具，不要重复查询同样的内容。最多 {max_steps} 步。
 5. 业务数据不一定更新到今天。用户说「本月 / 上月 / 最近」时，先确认数据的实际时间范围；若数据未覆盖，
    按数据中最新的月份理解，并在回答里明确说明你采用的时间范围。
@@ -275,7 +276,7 @@ def _merge_citations(citations: list[dict], answer: str) -> list[dict]:
 # 未配置大模型时的规则路由
 # ---------------------------------------------------------------------------
 
-_ANALYSIS_WORDS = ("为什么", "原因", "下降", "上升", "归因", "拖累", "ROI", "roi", "退款", "GMV", "gmv", "净销售", "毛利", "转化")
+_ANALYSIS_WORDS = ("为什么", "原因", "下降", "上升", "归因", "拖累", "经营", "销售额", "毛利", "达成", "目标", "台数", "库龄", "门店")
 
 
 def _fallback(user, session_id, question, target_table, trace) -> Iterator[dict]:

@@ -1,16 +1,22 @@
 """
-经营分析 Agent — 基于 LangGraph 的确定性分析工作流
+门店经营分析 Agent — 基于 LangGraph 的确定性分析工作流
 
   planner → knowledge → sql → executor → analysis → attribution → visualization → report
 
+分析对象是荣耀授权体验店的销售台账（fact_store_sales）、月度任务（fact_store_targets）和库龄表（fact_stock_age）：
+  - 门店：销售额、毛利、毛利率、手机台数，对照毛利目标计算达成率；月中按已过天数预估月底达成
+  - 结构：产品线（类型）、店员、收款方式，定位贡献最大和差距最大的部分
+  - 库存：长库龄（> 90 天）商品的数量和金额
+
 设计取舍:
   - 不依赖 LLM：SQL 由模板生成，结论可复现、可审计，适合作为"可信基线"
-  - 分析周期从数据中自动识别（最新月份 vs 上一月份），也支持问题中显式指定月份
+  - 分析月份从数据中自动识别（最新月份），也支持问题中显式指定月份和门店
   - 任何节点失败后，下游节点自动跳过，错误定位到具体步骤
 """
 
 from __future__ import annotations
 
+import calendar
 import logging
 import re
 import uuid
@@ -41,23 +47,13 @@ logger = logging.getLogger("nl2sql.agent")
 __all__ = ["run_analysis", "list_history", "get_history_detail", "export_report", "save_analysis_result"]
 
 _MONTH_LABEL = re.compile(r"^\d{4}-\d{2}$")
-
-# 有效订单 + 按订单预聚合的退款，避免一单多笔退款时 JOIN 放大 GMV
-_ORDERS_WITH_REFUNDS = """
-    SELECT o.*, COALESCE(rf.refund_amount, 0) AS refund_amount
-    FROM fact_orders o
-    LEFT JOIN (
-        SELECT order_id, SUM(refund_amount) AS refund_amount
-        FROM fact_refunds
-        GROUP BY order_id
-    ) rf ON rf.order_id = o.order_id
-    WHERE o.status = 'paid'
-"""
+LONG_STOCK_DAYS = 90
 
 _FOCUS_KEYWORDS = {
-    "roi": ("ROI", "roi", "渠道", "投放", "营销"),
-    "refund": ("退款", "售后", "退货"),
-    "region": ("华北", "北京", "地区", "区域", "省", "高价值用户"),
+    "target": ("达成", "目标", "任务", "完成率", "差距", "差额"),
+    "staff": ("店员", "员工", "人员", "提成", "红包", "个人", "谁"),
+    "stock": ("库存", "库龄", "压货", "积压", "清尾", "滞销"),
+    "product": ("产品线", "系列", "机型", "品类", "类型", "结构", "折叠", "配件"),
 }
 
 
@@ -66,6 +62,7 @@ class AgentState(TypedDict, total=False):
     analysis_mode: str
     run_id: str
     period: dict[str, str]
+    stores: list[dict[str, Any]]
     focus: str
     steps: list[dict[str, Any]]
     plan: list[dict[str, str]]
@@ -87,6 +84,7 @@ def run_analysis(question: str, analysis_mode: str = "auto", user_id: int | None
         "analysis_mode": analysis_mode,
         "run_id": str(uuid.uuid4()),
         "period": {},
+        "stores": [],
         "focus": "overview",
         "steps": [],
         "plan": [],
@@ -132,7 +130,7 @@ def export_report(run_id: str, export_format: str = "markdown", user_id: int | N
 
     report = detail.get("report", {})
     markdown = report.get("markdown") or render_markdown(
-        "经营分析报告",
+        "门店经营分析报告",
         report.get("summary", ""),
         report.get("findings", []),
         report.get("recommendations", []),
@@ -170,8 +168,9 @@ def _get_graph():
 def planner_node(state: AgentState) -> AgentState:
     def work() -> str:
         question = state["question"]
-        current, previous = _resolve_period(question)
-        state["period"] = {"current": current, "previous": previous}
+        current, previous, last_day = _resolve_period(question)
+        state["period"] = {"current": current, "previous": previous, "last_day": last_day}
+        state["stores"] = _resolve_stores(question)
 
         focus = "overview"
         for name, words in _FOCUS_KEYWORDS.items():
@@ -180,49 +179,35 @@ def planner_node(state: AgentState) -> AgentState:
                 break
         state["focus"] = focus
 
+        scope = "、".join(s["short_name"] for s in state["stores"]) or "全部门店"
         plan = [
-            {"id": "monthly_trend", "purpose": f"对比 {previous} 与 {current} 核心经营指标"},
-            {"id": "region_attribution", "purpose": "按省份定位 GMV 变化来源"},
-            {"id": "category_attribution", "purpose": "按品类拆解销售、成本和退款"},
-            {"id": "channel_roi", "purpose": "按渠道计算净销售额、营销花费和 ROI"},
-            {"id": "traffic_conversion", "purpose": "检查渠道和大区转化率变化"},
+            {"id": "store_overview", "purpose": f"{scope} {current} 销售额、毛利、毛利率、手机台数"},
+            {"id": "store_targets", "purpose": "对照月度毛利目标计算达成率，月中预估月底达成"},
+            {"id": "type_mix", "purpose": "按产品线拆解销售额和毛利"},
+            {"id": "item_targets", "purpose": "找出与产品线目标差距最大的部分"},
+            {"id": "staff", "purpose": "店员销售、毛利、提成与个人目标"},
+            {"id": "payment_mix", "purpose": "收款方式结构（国补、微信、支付宝、京东等）"},
+            {"id": "stock_age", "purpose": f"门店在库商品库龄，统计超过 {LONG_STOCK_DAYS} 天的长库龄库存"},
         ]
-        focus_purpose = {
-            "roi": "重点解释 ROI 变化最大的渠道",
-            "refund": "重点解释退款率最高的品类",
-            "region": "重点解释拖累最大的地区及其转化漏斗",
-        }.get(focus)
-        if focus_purpose:
-            plan.append({"id": f"{focus}_focus", "purpose": focus_purpose})
+        if previous != current:
+            plan.insert(1, {"id": "mom", "purpose": f"与 {previous} 环比"})
         state["plan"] = plan
-        return f"分析周期 {previous} → {current}，关注点 {focus}，生成 {len(plan)} 个分析步骤。"
+        return f"分析 {scope} {current}（数据截至 {last_day}），关注点 {focus}，生成 {len(plan)} 个分析步骤。"
 
     return run_node(state, "planner", work)
 
 
 def knowledge_node(state: AgentState) -> AgentState:
     def work() -> str:
-        # 优先检索企业知识库（客户自己的指标口径/业务规则），知识库为空或不可用时回退到内置演示知识
+        # 检索企业知识库里的门店指导书、考核规则、指标口径；不可用时不影响数据分析
         try:
             from backend.kb.rag import knowledge_for_agent
 
             state["knowledge"] = knowledge_for_agent(state["question"])
         except Exception as exc:
-            logger.warning("企业知识库检索失败，回退到内置知识: %s", exc)
+            logger.warning("企业知识库检索失败: %s", exc)
             state["knowledge"] = []
-        if state["knowledge"]:
-            return f"从企业知识库检索到 {len(state['knowledge'])} 条相关知识。"
-
-        candidates = ("GMV", "销售额", "净销售额", "毛利", "退款", "ROI", "渠道", "华北", "北京", "高价值用户", "销售下降", "利润")
-        keywords = [kw for kw in candidates if kw in state["question"]] or ["GMV", "销售下降", "ROI", "退款"]
-        clauses = " OR ".join(f"keywords ILIKE :kw{i}" for i in range(len(keywords)))
-        params = {f"kw{i}": f"%{kw}%" for i, kw in enumerate(keywords)}
-        result = execute_sql(
-            f"SELECT source, content FROM knowledge_chunks WHERE {clauses} ORDER BY chunk_id LIMIT 6",
-            params,
-        )
-        state["knowledge"] = [{"source": row[0], "content": row[1]} for row in result["data"]]
-        return f"检索到 {len(state['knowledge'])} 条内置业务知识。"
+        return f"从企业知识库检索到 {len(state['knowledge'])} 条相关知识。"
 
     return run_node(state, "knowledge", work)
 
@@ -230,102 +215,132 @@ def knowledge_node(state: AgentState) -> AgentState:
 def sql_node(state: AgentState) -> AgentState:
     def work() -> str:
         months = _months_in_clause(state["period"])
+        current = _months_in_clause({"current": state["period"]["current"], "previous": state["period"]["current"]})
+        ids = [int(s["store_id"]) for s in state["stores"]]
+        store_filter = f" AND s.store_id IN ({', '.join(map(str, ids))})" if ids else ""
+        stock_filter = f" AND a.store_id IN ({', '.join(map(str, ids))})" if ids else ""
+        target_filter = f" AND t.store_id IN ({', '.join(map(str, ids))})" if ids else ""
         state["sql_queries"] = [
             {
-                "id": "monthly_trend",
-                "purpose": "月度核心指标趋势",
+                "id": "store_overview",
+                "purpose": "门店月度核心指标",
                 "sql": f"""
-                    SELECT d.month_label AS "月份",
-                           ROUND(SUM(o.order_amount), 2) AS "GMV",
-                           COUNT(*) AS "订单数",
-                           ROUND(AVG(o.order_amount), 2) AS "客单价",
-                           ROUND(SUM(o.product_cost), 2) AS "商品成本",
-                           ROUND(SUM(o.refund_amount), 2) AS "退款金额",
-                           ROUND(SUM(o.order_amount) - SUM(o.refund_amount), 2) AS "净销售额",
-                           ROUND((SUM(o.order_amount) - SUM(o.product_cost) - SUM(o.refund_amount)) / NULLIF(SUM(o.order_amount), 0), 4) AS "毛利率"
-                    FROM ({_ORDERS_WITH_REFUNDS}) o
-                    JOIN dim_date d ON d.date_id = o.order_date
-                    WHERE d.month_label IN ({months})
-                    GROUP BY d.month_label
-                    ORDER BY d.month_label
+                    SELECT d.short_name AS "门店", s.month_label AS "月份",
+                           ROUND(SUM(s.sale_price), 2) AS "销售额",
+                           ROUND(SUM(s.gross_profit), 2) AS "毛利",
+                           ROUND(SUM(s.gross_profit) / NULLIF(SUM(s.sale_price), 0), 4) AS "毛利率",
+                           COUNT(*) FILTER (WHERE s.is_phone) AS "手机台数",
+                           ROUND(COALESCE(SUM(s.sale_price) FILTER (WHERE s.is_phone), 0), 2) AS "手机销售额",
+                           COUNT(*) FILTER (WHERE s.product_type = '回收') AS "回收台数",
+                           MAX(s.sale_date) AS "最新日期"
+                    FROM fact_store_sales s JOIN dim_store d ON d.store_id = s.store_id
+                    WHERE s.month_label IN ({months}){store_filter}
+                    GROUP BY d.short_name, d.store_id, s.month_label
+                    ORDER BY d.store_id, s.month_label
                 """,
             },
             {
-                "id": "region_attribution",
-                "purpose": "地区 GMV 变化贡献",
+                "id": "store_targets",
+                "purpose": "门店毛利目标",
                 "sql": f"""
-                    SELECT r.region_name AS "大区", r.province AS "省份", d.month_label AS "月份",
-                           ROUND(SUM(o.order_amount), 2) AS "GMV"
-                    FROM ({_ORDERS_WITH_REFUNDS}) o
-                    JOIN dim_date d ON d.date_id = o.order_date
-                    JOIN dim_region r ON r.region_id = o.region_id
-                    WHERE d.month_label IN ({months})
-                    GROUP BY r.region_name, r.province, d.month_label
-                    ORDER BY r.region_name, r.province, d.month_label
+                    SELECT d.short_name AS "门店", t.target_value AS "毛利目标", t.achieved_value AS "台账达成",
+                           t.as_of AS "统计截至"
+                    FROM fact_store_targets t JOIN dim_store d ON d.store_id = t.store_id
+                    WHERE t.month_label IN ({current}) AND t.owner_type = 'store' AND t.item = '总毛利'{target_filter}
+                    ORDER BY d.store_id
                 """,
             },
             {
-                "id": "category_attribution",
-                "purpose": "品类销售、成本、退款拆解",
+                "id": "type_mix",
+                "purpose": "产品线销售与毛利",
                 "sql": f"""
-                    SELECT p.category AS "品类", d.month_label AS "月份",
-                           ROUND(SUM(o.order_amount), 2) AS "GMV",
-                           ROUND(SUM(o.product_cost), 2) AS "商品成本",
-                           ROUND(SUM(o.refund_amount), 2) AS "退款金额",
-                           ROUND(SUM(o.refund_amount) / NULLIF(SUM(o.order_amount), 0), 4) AS "退款率"
-                    FROM ({_ORDERS_WITH_REFUNDS}) o
-                    JOIN dim_date d ON d.date_id = o.order_date
-                    JOIN dim_product p ON p.product_id = o.product_id
-                    WHERE d.month_label IN ({months})
-                    GROUP BY p.category, d.month_label
-                    ORDER BY p.category, d.month_label
+                    SELECT COALESCE(s.product_type, '未分类') AS "产品线", s.month_label AS "月份",
+                           ROUND(COALESCE(SUM(s.sale_price), 0), 2) AS "销售额",
+                           ROUND(COALESCE(SUM(s.gross_profit), 0), 2) AS "毛利",
+                           COUNT(*) AS "件数"
+                    FROM fact_store_sales s
+                    WHERE s.month_label IN ({months}){store_filter}
+                    GROUP BY COALESCE(s.product_type, '未分类'), s.month_label
+                    ORDER BY "毛利" DESC
                 """,
             },
             {
-                "id": "channel_roi",
-                "purpose": "渠道 ROI 变化",
+                "id": "item_targets",
+                "purpose": "产品线毛利目标与完成",
                 "sql": f"""
-                    WITH sales AS (
-                        SELECT o.channel_id, d.month_label,
-                               SUM(o.order_amount) AS gmv,
-                               SUM(o.refund_amount) AS refunds
-                        FROM ({_ORDERS_WITH_REFUNDS}) o
-                        JOIN dim_date d ON d.date_id = o.order_date
-                        WHERE d.month_label IN ({months})
-                        GROUP BY o.channel_id, d.month_label
-                    ),
-                    spend AS (
-                        SELECT ms.channel_id, d.month_label, SUM(ms.spend_amount) AS spend
-                        FROM fact_marketing_spend ms
-                        JOIN dim_date d ON d.date_id = ms.spend_date
-                        WHERE d.month_label IN ({months})
-                        GROUP BY ms.channel_id, d.month_label
+                    SELECT d.short_name AS "门店", t.item AS "考核项",
+                           t.target_value AS "目标", t.achieved_value AS "完成",
+                           ROUND(t.achieved_value / NULLIF(t.target_value, 0), 4) AS "达成率",
+                           t.target_value - COALESCE(t.achieved_value, 0) AS "差额"
+                    FROM fact_store_targets t JOIN dim_store d ON d.store_id = t.store_id
+                    WHERE t.month_label IN ({current}) AND t.owner_type = 'store' AND t.unit = '毛利'
+                      AND t.item <> '总毛利' AND t.target_value > 0{target_filter}
+                    ORDER BY "差额" DESC
+                """,
+            },
+            {
+                "id": "staff",
+                "purpose": "店员业绩",
+                "sql": f"""
+                    WITH perf AS (
+                        SELECT s.store_id, s.salesperson,
+                               SUM(s.sale_price) AS sales, SUM(s.gross_profit) AS profit,
+                               COUNT(*) FILTER (WHERE s.is_phone) AS phones,
+                               SUM(COALESCE(s.commission, 0) + COALESCE(s.red_packet, 0)) AS bonus
+                        FROM fact_store_sales s
+                        WHERE s.month_label IN ({current}) AND s.salesperson IS NOT NULL{store_filter}
+                        GROUP BY s.store_id, s.salesperson
                     )
-                    SELECT c.channel_name AS "渠道", s.month_label AS "月份",
-                           ROUND(s.gmv - s.refunds, 2) AS "净销售额",
-                           ROUND(sp.spend, 2) AS "营销花费",
-                           ROUND((s.gmv - s.refunds) / NULLIF(sp.spend, 0), 4) AS "ROI"
-                    FROM sales s
-                    JOIN spend sp ON sp.channel_id = s.channel_id AND sp.month_label = s.month_label
-                    JOIN dim_channel c ON c.channel_id = s.channel_id
-                    ORDER BY c.channel_name, s.month_label
+                    SELECT d.short_name AS "门店", p.salesperson AS "店员",
+                           ROUND(p.sales, 2) AS "销售额", ROUND(p.profit, 2) AS "毛利", p.phones AS "手机台数",
+                           ROUND(p.bonus, 2) AS "提成红包", t.target_value AS "个人毛利目标",
+                           ROUND(p.profit / NULLIF(t.target_value, 0), 4) AS "达成率"
+                    FROM perf p
+                    JOIN dim_store d ON d.store_id = p.store_id
+                    LEFT JOIN fact_store_targets t
+                      ON t.store_id = p.store_id AND t.owner = p.salesperson AND t.owner_type = 'staff'
+                     AND t.item = '总毛利' AND t.month_label IN ({current})
+                    ORDER BY p.profit DESC NULLS LAST
                 """,
             },
             {
-                "id": "traffic_conversion",
-                "purpose": "渠道转化率变化",
+                "id": "payment_mix",
+                "purpose": "收款方式结构",
                 "sql": f"""
-                    SELECT c.channel_name AS "渠道", r.region_name AS "大区", d.month_label AS "月份",
-                           SUM(t.visits) AS "访问量",
-                           SUM(t.paid_orders) AS "支付订单数",
-                           ROUND(SUM(t.paid_orders)::numeric / NULLIF(SUM(t.visits), 0), 4) AS "转化率"
-                    FROM fact_daily_traffic t
-                    JOIN dim_date d ON d.date_id = t.traffic_date
-                    JOIN dim_channel c ON c.channel_id = t.channel_id
-                    JOIN dim_region r ON r.region_id = t.region_id
-                    WHERE d.month_label IN ({months})
-                    GROUP BY c.channel_name, r.region_name, d.month_label
-                    ORDER BY c.channel_name, r.region_name, d.month_label
+                    SELECT COALESCE(s.payment_method, '未填写') AS "收款方式", COUNT(*) AS "笔数",
+                           ROUND(SUM(s.sale_price), 2) AS "销售额",
+                           ROUND(SUM(s.subsidy_receivable), 2) AS "国补应返"
+                    FROM fact_store_sales s
+                    WHERE s.month_label IN ({current}){store_filter}
+                    GROUP BY COALESCE(s.payment_method, '未填写')
+                    ORDER BY "销售额" DESC NULLS LAST
+                """,
+            },
+            {
+                "id": "stock_age",
+                "purpose": "门店库龄",
+                "sql": f"""
+                    SELECT d.short_name AS "门店", SUM(a.quantity) AS "在库数量",
+                           ROUND(SUM(a.cost_price * a.quantity), 2) AS "库存金额",
+                           SUM(a.quantity) FILTER (WHERE a.age_days > {LONG_STOCK_DAYS}) AS "长库龄数量",
+                           ROUND(SUM(a.cost_price * a.quantity) FILTER (WHERE a.age_days > {LONG_STOCK_DAYS}), 2) AS "长库龄金额",
+                           ROUND(AVG(a.age_days), 0) AS "平均库龄"
+                    FROM fact_stock_age a JOIN dim_store d ON d.store_id = a.store_id
+                    WHERE a.snapshot_date = (SELECT MAX(snapshot_date) FROM fact_stock_age){stock_filter}
+                    GROUP BY d.short_name, d.store_id
+                    ORDER BY d.store_id
+                """,
+            },
+            {
+                "id": "daily_trend",
+                "purpose": "每日销售额与毛利",
+                "sql": f"""
+                    SELECT s.sale_date AS "日期", ROUND(SUM(s.sale_price), 2) AS "销售额",
+                           ROUND(SUM(s.gross_profit), 2) AS "毛利"
+                    FROM fact_store_sales s
+                    WHERE s.month_label IN ({current}){store_filter}
+                    GROUP BY s.sale_date
+                    ORDER BY s.sale_date
                 """,
             },
         ]
@@ -345,25 +360,51 @@ def executor_node(state: AgentState) -> AgentState:
 def analysis_node(state: AgentState) -> AgentState:
     def work() -> str:
         period = state["period"]
-        by_month = {row["月份"]: row for row in rows_of(_query(state, "monthly_trend"))}
-        previous = by_month.get(period["previous"], {})
-        current = by_month.get(period["current"], {})
-        if not current:
-            raise ValueError(f"{period['current']} 没有订单数据，无法分析。")
+        overview = rows_of(_query(state, "store_overview"))
+        current_rows = [r for r in overview if r["月份"] == period["current"]]
+        previous_rows = [r for r in overview if r["月份"] == period["previous"]] if period["previous"] != period["current"] else []
+        # 环比只比较两个月都有数据的门店（同店口径），避免新接入的门店把增幅放大
+        same_store = {r["门店"] for r in previous_rows} & {r["门店"] for r in current_rows}
+        previous_rows = [r for r in previous_rows if r["门店"] in same_store]
+        period["same_store"] = sorted(same_store)
+        if not current_rows:
+            raise ValueError(f"{period['current']} 没有门店销售数据，无法分析。")
+
+        targets = {r["门店"]: float(r["毛利目标"] or 0) for r in rows_of(_query(state, "store_targets"))}
+        progress = _month_progress(period)
+
+        def total(rows: list[dict[str, Any]], key: str) -> float:
+            return sum(float(r.get(key) or 0) for r in rows)
+
+        cur = {k: total(current_rows, k) for k in ("销售额", "毛利", "手机台数")}
+        cur_same = {k: total([r for r in current_rows if r["门店"] in same_store], k) for k in ("销售额", "毛利", "手机台数")}
+        cur_same["毛利率"] = cur_same["毛利"] / cur_same["销售额"] if cur_same["销售额"] else 0
+        prev = {k: total(previous_rows, k) for k in ("销售额", "毛利", "手机台数")}
+        cur["毛利率"] = cur["毛利"] / cur["销售额"] if cur["销售额"] else 0
+        prev["毛利率"] = prev["毛利"] / prev["销售额"] if prev["销售额"] else 0
+        target_total = sum(targets.get(r["门店"], 0) for r in current_rows)
+
         metrics = []
-        for name in ("GMV", "订单数", "客单价", "商品成本", "退款金额", "净销售额", "毛利率"):
-            prev = float(previous.get(name) or 0)
-            cur = float(current.get(name) or 0)
-            change = cur - prev
+        comparison = "环比" if not same_store or len(same_store) == len(current_rows) else f"同店环比（{'、'.join(sorted(same_store))}）"
+        for name in ("销售额", "毛利", "毛利率", "手机台数"):
+            change = cur_same[name] - prev[name]
             metrics.append({
                 "name": name,
-                "previous": prev,
-                "current": cur,
-                "change": change,
-                "change_rate": safe_rate(change, prev),
+                "previous": prev[name] if previous_rows else None,
+                "current": cur[name],
+                "change": change if previous_rows else None,
+                "change_rate": safe_rate(change, prev[name]) if previous_rows else None,
+                "comparison": comparison,
             })
+        if target_total:
+            metrics.append({"name": "毛利目标", "previous": None, "current": target_total, "change": None, "change_rate": None})
+            metrics.append({"name": "毛利达成率", "previous": None, "current": cur["毛利"] / target_total,
+                            "change": None, "change_rate": None})
+            if progress < 1:
+                metrics.append({"name": "预计月底达成率", "previous": None,
+                                "current": cur["毛利"] / progress / target_total, "change": None, "change_rate": None})
         state["metrics"] = metrics
-        return f"计算 {len(metrics)} 个核心指标。"
+        return f"计算 {len(metrics)} 个核心指标（月度进度 {progress:.0%}）。"
 
     return run_node(state, "analysis", work)
 
@@ -371,136 +412,193 @@ def analysis_node(state: AgentState) -> AgentState:
 def attribution_node(state: AgentState) -> AgentState:
     def work() -> str:
         period = state["period"]
-        region = _contribution(rows_of(_query(state, "region_attribution")), "省份", "GMV", period)
-        category_rows = rows_of(_query(state, "category_attribution"))
-        traffic_rows = rows_of(_query(state, "traffic_conversion"))
+        progress = _month_progress(period)
+        overview = rows_of(_query(state, "store_overview"))
+        targets = {r["门店"]: r for r in rows_of(_query(state, "store_targets"))}
+        previous = {r["门店"]: r for r in overview if r["月份"] == period["previous"]} if period["previous"] != period["current"] else {}
 
-        # 转化率下钻到"拖累最大的省份"所在大区，而不是写死华北
-        region_lookup = {row["省份"]: row["大区"] for row in rows_of(_query(state, "region_attribution"))}
-        focus_region = region_lookup.get(region[0]["省份"]) if region else None
+        stores = []
+        for row in (r for r in overview if r["月份"] == period["current"]):
+            target = float((targets.get(row["门店"]) or {}).get("毛利目标") or 0)
+            profit = float(row["毛利"] or 0)
+            prev_profit = previous.get(row["门店"], {}).get("毛利")
+            stores.append({
+                "门店": row["门店"],
+                "销售额": float(row["销售额"] or 0),
+                "毛利": profit,
+                "毛利率": float(row["毛利率"] or 0),
+                "手机台数": int(row["手机台数"] or 0),
+                "手机销售额": float(row["手机销售额"] or 0),
+                "手机销售占比": float(row["手机销售额"] or 0) / float(row["销售额"]) if row["销售额"] else None,
+                "手机均价": float(row["手机销售额"] or 0) / int(row["手机台数"]) if row["手机台数"] else None,
+                "毛利目标": target or None,
+                "达成率": profit / target if target else None,
+                "预计达成率": profit / progress / target if target and progress < 1 else None,
+                "毛利环比": safe_rate(profit - float(prev_profit), float(prev_profit)) if prev_profit else None,
+            })
+        stores.sort(key=lambda r: (r["达成率"] is None, r["达成率"] or 0))
 
+        type_rows = [r for r in rows_of(_query(state, "type_mix")) if r["月份"] == period["current"]]
+        profit_total = sum(float(r["毛利"] or 0) for r in type_rows) or 1
+        type_rows.sort(key=lambda r: -float(r["毛利"] or 0))
+        types = [{
+            "产品线": r["产品线"], "销售额": float(r["销售额"] or 0), "毛利": float(r["毛利"] or 0),
+            "件数": int(r["件数"] or 0), "毛利占比": float(r["毛利"] or 0) / profit_total,
+        } for r in type_rows]
+
+        gaps = [{
+            "门店": r["门店"], "考核项": r["考核项"], "目标": float(r["目标"] or 0), "完成": float(r["完成"] or 0),
+            "达成率": float(r["达成率"]) if r["达成率"] is not None else None, "差额": float(r["差额"] or 0),
+        } for r in rows_of(_query(state, "item_targets")) if float(r["差额"] or 0) > 0][:8]
+
+        staff = rows_of(_query(state, "staff"))
+        stock = rows_of(_query(state, "stock_age"))
+        payments = rows_of(_query(state, "payment_mix"))
         state["attribution"] = {
-            "region": region,
-            "category": _contribution(category_rows, "品类", "GMV", period),
-            "refund": _change(category_rows, "品类", "退款率", period, by_current=True),
-            "roi": _change(rows_of(_query(state, "channel_roi")), "渠道", "ROI", period),
-            "conversion_region": _change(
-                [row for row in traffic_rows if row.get("大区") == focus_region],
-                "渠道",
-                "转化率",
-                period,
-            ),
-            "focus_region": focus_region,
+            "stores": stores,
+            "types": types,
+            "gaps": gaps,
+            "staff": staff,
+            "stock": stock,
+            "payments": payments,
+            "tables": [
+                {"title": "门店达成", "rows": stores},
+                {"title": "产品线差距最大（毛利目标）", "rows": gaps},
+                {"title": "店员业绩", "rows": staff[:10]},
+                {"title": "产品线结构", "rows": types[:10]},
+                {"title": f"库龄（超过 {LONG_STOCK_DAYS} 天为长库龄）", "rows": stock},
+                {"title": "收款方式", "rows": payments[:8]},
+            ],
         }
-        return f"完成地区、品类、退款率、ROI 归因，并下钻 {focus_region or '重点大区'} 转化率。"
+        return f"完成 {len(stores)} 家门店达成、{len(types)} 条产品线、{len(staff)} 名店员、库龄与收款结构分析。"
 
     return run_node(state, "attribution", work)
 
 
 def visualization_node(state: AgentState) -> AgentState:
     def work() -> str:
-        monthly = rows_of(_query(state, "monthly_trend"))
-        region = state["attribution"]["region"][:8]
-        roi = state["attribution"]["roi"]
-        state["charts"] = [
+        attr = state["attribution"]
+        stores = attr["stores"]
+        types = [t for t in attr["types"] if t["产品线"] != "未分类"][:10]
+        daily = rows_of(_query(state, "daily_trend"))
+        charts = [
             {
-                "title": "月度 GMV 与净销售额",
-                "type": "line",
-                "echarts_option": line_chart(
-                    [row["月份"] for row in monthly],
+                "title": "门店毛利与目标",
+                "type": "bar",
+                "echarts_option": bar_chart(
+                    [s["门店"] for s in stores],
                     [
-                        {"name": "GMV", "data": [row["GMV"] for row in monthly]},
-                        {"name": "净销售额", "data": [row["净销售额"] for row in monthly]},
+                        {"name": "毛利", "data": [round(s["毛利"], 2) for s in stores]},
+                        {"name": "毛利目标", "data": [s["毛利目标"] or 0 for s in stores]},
                     ],
                 ),
             },
             {
-                "title": "省份 GMV 变化贡献（Top 8 下降）",
+                "title": "产品线毛利",
                 "type": "bar",
-                "echarts_option": bar_chart(
-                    [row["省份"] for row in region],
-                    [{"name": "GMV变化", "data": [round(row["change"], 2) for row in region]}],
-                ),
-            },
-            {
-                "title": "渠道 ROI 变化",
-                "type": "bar",
-                "echarts_option": bar_chart(
-                    [row["渠道"] for row in roi],
-                    [{"name": "ROI变化", "data": [round(row["change"], 4) for row in roi]}],
-                ),
+                "echarts_option": bar_chart([t["产品线"] for t in types],
+                                            [{"name": "毛利", "data": [round(t["毛利"], 2) for t in types]}]),
             },
         ]
-        return f"生成 {len(state['charts'])} 个图表配置。"
+        if len(daily) > 1:
+            charts.insert(0, {
+                "title": "每日销售额与毛利",
+                "type": "line",
+                "echarts_option": line_chart(
+                    [str(r["日期"])[5:] for r in daily],
+                    [
+                        {"name": "销售额", "data": [r["销售额"] for r in daily]},
+                        {"name": "毛利", "data": [r["毛利"] for r in daily]},
+                    ],
+                ),
+            })
+        state["charts"] = charts
+        return f"生成 {len(charts)} 个图表配置。"
 
     return run_node(state, "visualization", work)
 
 
 def report_node(state: AgentState) -> AgentState:
     def work() -> str:
-        current_month = state["period"]["current"]
-        focus = state["focus"]
-        metrics = {item["name"]: item for item in state["metrics"]}
+        period = state["period"]
+        month = _month_text(period["current"])
+        metrics = {m["name"]: m for m in state["metrics"]}
         attr = state["attribution"]
-        top_region = attr["region"][0] if attr["region"] else None
-        top_category = attr["category"][0] if attr["category"] else None
-        top_refund = attr["refund"][0] if attr["refund"] else None
-        top_roi = attr["roi"][0] if attr["roi"] else None
-        focus_region = attr.get("focus_region")
+        stores = attr["stores"]
+        scope = "、".join(s["short_name"] for s in state["stores"]) or f"{len(stores)} 家门店"
+        progress = _month_progress(period)
 
-        if focus == "roi" and top_roi:
-            summary = (
-                f"{current_month} 渠道分析显示，{top_roi['渠道']} ROI 下滑最明显，"
-                f"从 {top_roi['previous']:.4f} 到 {top_roi['current']:.4f}，变化 {top_roi['change']:+.4f}。"
-            )
-        elif focus == "refund" and top_refund:
-            summary = (
-                f"{current_month} 退款率最高的品类是{top_refund['品类']}，"
-                f"退款率从 {top_refund['previous']:.2%} 变为 {top_refund['current']:.2%}。"
-            )
-        elif focus == "region" and top_region:
-            summary = (
-                f"{current_month} 地区分析显示，{top_region['省份']}（{focus_region or '—'}）GMV 变化最大，"
-                f"从 {top_region['previous']:,.2f} 到 {top_region['current']:,.2f}，变化 {top_region['change']:+,.2f}。"
-            )
-        else:
-            summary = (
-                f"{current_month} GMV 环比 {_fmt_rate(metrics['GMV']['change_rate'])}，"
-                f"净销售额环比 {_fmt_rate(metrics['净销售额']['change_rate'])}。"
-            )
-            if top_region and top_region["change"] < 0:
-                summary += f" 最大拖累省份是{top_region['省份']}，GMV 变化 {top_region['change']:+,.2f}。"
+        profit = metrics["毛利"]["current"]
+        summary = (
+            f"{month} {scope}销售额 {_wan(metrics['销售额']['current'])}、毛利 {_wan(profit)}，"
+            f"毛利率 {metrics['毛利率']['current']:.1%}，手机 {int(metrics['手机台数']['current'])} 台"
+        )
+        if "毛利达成率" in metrics:
+            summary += f"；毛利目标 {_wan(metrics['毛利目标']['current'])}，达成 {metrics['毛利达成率']['current']:.1%}"
+            if "预计月底达成率" in metrics:
+                summary += f"（数据截至 {period['last_day']}，按当前进度预计月底 {metrics['预计月底达成率']['current']:.1%}）"
+        summary += "。"
+        ranked = [s for s in stores if s["达成率"] is not None]
+        if len(ranked) > 1:
+            summary += f" 达成最高的是{ranked[-1]['门店']}（{ranked[-1]['达成率']:.1%}），最低的是{ranked[0]['门店']}（{ranked[0]['达成率']:.1%}）。"
 
-        findings = [
-            _metric_sentence("GMV", metrics["GMV"]),
-            _metric_sentence("净销售额", metrics["净销售额"]),
-            _metric_sentence("退款金额", metrics["退款金额"]),
-            _metric_sentence("毛利率", metrics["毛利率"], percent_value=True),
-        ]
-        if top_category and top_category["change"] < 0:
-            findings.append(
-                f"{top_category['品类']}是品类侧最大下降来源，GMV 变化 {top_category['change']:+,.2f}，"
-                f"占总变化 {top_category['contribution']:.2%}。"
-            )
-        if top_refund:
-            findings.append(f"{top_refund['品类']}退款率最高，当前为 {top_refund['current']:.2%}。")
-        if top_roi:
-            findings.append(f"{top_roi['渠道']} ROI 变化最明显，从 {top_roi['previous']:.4f} 到 {top_roi['current']:.4f}。")
-        conversion = attr.get("conversion_region") or []
-        if conversion and conversion[0]["change"] < 0:
-            worst = conversion[0]
-            findings.append(
-                f"{focus_region}{worst['渠道']}转化率从 {worst['previous']:.2%} 降至 {worst['current']:.2%}，"
-                "是该区域漏斗中下滑最明显的环节。"
-            )
+        findings: list[str] = []
+        focused: dict[str, str] = {}
+        if metrics["毛利"]["change_rate"] is not None:
+            findings.append(f"{metrics['毛利']['comparison']}：毛利 {_fmt_rate(metrics['毛利']['change_rate'])}，"
+                            f"销售额 {_fmt_rate(metrics['销售额']['change_rate'])}。")
+        for s in stores:
+            line = f"{s['门店']}：销售额 {_wan(s['销售额'])}，毛利 {_wan(s['毛利'])}（毛利率 {s['毛利率']:.1%}），手机 {s['手机台数']} 台"
+            if s["手机台数"]:
+                line += (f"（手机销售额 {_wan(s['手机销售额'])}，占销售额 {s['手机销售占比']:.0%}，"
+                         f"均价 {s['手机均价']:,.0f} 元）")
+            if s["达成率"] is not None:
+                line += f"，毛利目标 {_wan(s['毛利目标'])}，达成 {s['达成率']:.1%}"
+            findings.append(line + "。")
+        top_types = sorted((t for t in attr["types"] if t["产品线"] != "未分类"), key=lambda t: -t["毛利"])[:3]
+        if top_types:
+            focused["product"] = "毛利贡献最大的产品线：" + "、".join(
+                f"{t['产品线']} {_wan(t['毛利'])}（{t['毛利占比']:.0%}）" for t in top_types) + "。"
+            findings.append(focused["product"])
+        losers = [t for t in attr["types"] if t["毛利"] < 0]
+        if losers:
+            findings.append("毛利为负的部分：" + "、".join(f"{t['产品线']} {t['毛利']:,.0f} 元" for t in losers)
+                            + "（多为赠品、膜等随单商品，计入了成本但售价为 0）。")
+        if attr["gaps"]:
+            g = attr["gaps"][0]
+            focused["target"] = (f"差距最大的考核项是{g['门店']}的{g['考核项']}：目标 {g['目标']:,.0f} 元，完成 {g['完成']:,.0f} 元，"
+                                 f"还差 {g['差额']:,.0f} 元。")
+            findings.append(focused["target"])
+        staff = [r for r in attr["staff"] if r.get("个人毛利目标")]
+        if staff:
+            best = max(staff, key=lambda r: float(r["达成率"] or 0))
+            worst = min(staff, key=lambda r: float(r["达成率"] or 0))
+            focused["staff"] = (f"店员个人毛利达成最高的是{best['门店']}{best['店员']}（{float(best['达成率'] or 0):.0%}），"
+                                f"最低的是{worst['门店']}{worst['店员']}（{float(worst['达成率'] or 0):.0%}）。")
+            findings.append(focused["staff"])
+        long_stock = [r for r in attr["stock"] if r.get("长库龄数量")]
+        if long_stock:
+            qty = sum(int(r["长库龄数量"] or 0) for r in long_stock)
+            amount = sum(float(r["长库龄金额"] or 0) for r in long_stock)
+            worst_stock = max(long_stock, key=lambda r: float(r["长库龄金额"] or 0))
+            focused["stock"] = (f"库龄超过 {LONG_STOCK_DAYS} 天的库存共 {qty} 件、{_wan(amount)}，"
+                                f"其中{worst_stock['门店']}最多（{_wan(float(worst_stock['长库龄金额'] or 0))}）。")
+            findings.append(focused["stock"])
+        if attr["payments"]:
+            p = attr["payments"][0]
+            share = float(p["销售额"] or 0) / (metrics["销售额"]["current"] or 1)
+            findings.append(f"收款以{p['收款方式']}为主，占销售额 {share:.0%}。")
 
-        recommendations = _recommendations_for(focus, top_region, top_refund, top_roi, focus_region)
+        if state["focus"] in focused:  # 用户关心的方面排在最前面
+            findings.remove(focused[state["focus"]])
+            findings.insert(0, focused[state["focus"]])
         state["report"] = {
             "summary": summary,
             "findings": findings,
-            "recommendations": recommendations,
-            "markdown": render_markdown("经营分析报告", summary, findings, recommendations),
+            "recommendations": _recommendations(state["focus"], stores, attr, progress),
+            "markdown": "",
         }
+        state["report"]["markdown"] = render_markdown("门店经营分析报告", summary, findings, state["report"]["recommendations"])
         return "生成结构化报告和业务建议。"
 
     return run_node(state, "report", work)
@@ -523,23 +621,19 @@ _NODES = (
 # ---------------------------------------------------------------------------
 
 
-def _resolve_period(question: str) -> tuple[str, str]:
+def _resolve_period(question: str) -> tuple[str, str, str]:
     """
-    确定分析周期：问题中显式提到的月份优先（"2026-05"、"2026年5月"、"5月"），
-    否则取有订单数据的最新月份；上期为数据中紧邻的前一个月份。
+    确定分析月份：问题中显式提到的月份优先（"2026-08"、"2026年8月"、"8月"），否则取有销售数据的最新月份；
+    上期为数据中紧邻的前一个月份（没有则与本期相同，不做环比）。返回 (本期, 上期, 本期数据最新日期)。
     """
-    result = execute_sql(
-        """
-        SELECT DISTINCT d.month_label
-        FROM fact_orders o JOIN dim_date d ON d.date_id = o.order_date
-        ORDER BY d.month_label
-        """
-    )
-    months = [row[0] for row in result["data"]]
+    result = execute_sql("""
+        SELECT month_label, MAX(sale_date)::text FROM fact_store_sales GROUP BY month_label ORDER BY month_label
+    """)
+    months = {row[0]: row[1] for row in result["data"]}
     if not months:
-        raise ValueError("fact_orders 中没有数据，请先初始化数据库。")
-
-    current = months[-1]
+        raise ValueError("fact_store_sales 中没有销售数据，请先导入门店台账（python -m backend.store_data.loader）。")
+    labels = list(months)
+    current = labels[-1]
     match = re.search(r"(\d{4})\s*[-年/.]\s*(\d{1,2})", question)
     if match:
         wanted = f"{match.group(1)}-{int(match.group(2)):02d}"
@@ -548,10 +642,20 @@ def _resolve_period(question: str) -> tuple[str, str]:
         wanted = f"{current[:4]}-{int(match.group(1)):02d}" if match else None
     if wanted in months:
         current = wanted
+    idx = labels.index(current)
+    previous = labels[idx - 1] if idx > 0 else current
+    return current, previous, months[current]
 
-    idx = months.index(current)
-    previous = months[idx - 1] if idx > 0 else current
-    return current, previous
+
+def _resolve_stores(question: str) -> list[dict[str, Any]]:
+    """问题里提到的门店（简称、商场名、别名均可）；没提到表示全部门店。"""
+    result = execute_sql("SELECT store_id, short_name, store_name, mall, aliases FROM dim_store ORDER BY store_id")
+    found = []
+    for store_id, short, name, mall, aliases in result["data"]:
+        names = [short, name, mall, *(aliases or [])]
+        if any(n and n in question for n in names):
+            found.append({"store_id": store_id, "short_name": short})
+    return found
 
 
 def _months_in_clause(period: dict[str, str]) -> str:
@@ -561,98 +665,62 @@ def _months_in_clause(period: dict[str, str]) -> str:
     return ", ".join(f"'{m}'" for m in sorted(months))
 
 
+def _month_progress(period: dict[str, str]) -> float:
+    """本期数据覆盖了当月多少天（用于月中预估月底达成）。"""
+    year, month = (int(x) for x in period["current"].split("-"))
+    days = calendar.monthrange(year, month)[1]
+    last_day = int(str(period.get("last_day") or "")[8:10] or days)
+    return min(last_day / days, 1.0)
+
+
+def _month_text(label: str) -> str:
+    year, month = label.split("-")
+    return f"{year} 年 {int(month)} 月"
+
+
 def _query(state: AgentState, query_id: str) -> dict[str, Any]:
     return next(item for item in state["sql_queries"] if item["id"] == query_id)
 
 
-def _pivot(rows: list[dict[str, Any]], dimension: str, metric: str, period: dict[str, str]) -> list[dict[str, Any]]:
-    buckets: dict[str, dict[str, float]] = {}
-    for row in rows:
-        key = str(row[dimension])
-        buckets.setdefault(key, {})[str(row["月份"])] = float(row.get(metric) or 0)
-    result = []
-    for key, values in buckets.items():
-        previous = values.get(period["previous"], 0.0)
-        current = values.get(period["current"], 0.0)
-        change = current - previous
-        result.append({
-            dimension: key,
-            "previous": previous,
-            "current": current,
-            "change": change,
-            "change_rate": safe_rate(change, previous),
-        })
-    return result
-
-
-def _contribution(rows: list[dict[str, Any]], dimension: str, metric: str, period: dict[str, str]) -> list[dict[str, Any]]:
-    result = _pivot(rows, dimension, metric, period)
-    total_change = sum(item["change"] for item in result)
-    for item in result:
-        item["contribution"] = item["change"] / total_change if total_change else 0
-    return sorted(result, key=lambda item: item["change"])
-
-
-def _change(
-    rows: list[dict[str, Any]],
-    dimension: str,
-    metric: str,
-    period: dict[str, str],
-    by_current: bool = False,
-) -> list[dict[str, Any]]:
-    """by_current=True 按当前值从高到低排序（如退款率），否则按变化从小到大（降幅最大在前）。"""
-    pivot = _pivot(rows, dimension, metric, period)
-    if by_current:
-        return sorted(pivot, key=lambda item: item["current"], reverse=True)
-    return sorted(pivot, key=lambda item: item["change"])
+def _wan(value: float | None) -> str:
+    if value is None:
+        return "—"
+    return f"{value / 10000:,.2f} 万元"
 
 
 def _fmt_rate(rate: float | None) -> str:
     return "—" if rate is None else f"{rate:+.2%}"
 
 
-def _metric_sentence(name: str, metric: dict[str, Any], percent_value: bool = False) -> str:
-    value_format = "{:.2%}" if percent_value else "{:,.2f}"
-    return (
-        f"{name}从 {value_format.format(metric['previous'])} 变化到 "
-        f"{value_format.format(metric['current'])}，环比 {_fmt_rate(metric['change_rate'])}。"
-    )
+def _recommendations(focus: str, stores: list[dict[str, Any]], attr: dict[str, Any], progress: float) -> list[str]:
+    tips: list[str] = []
+    behind = [s for s in stores if s["达成率"] is not None and (s["预计达成率"] or s["达成率"]) < 1]
+    gaps = attr["gaps"]
+    long_stock = sorted((r for r in attr["stock"] if r.get("长库龄金额")), key=lambda r: -float(r["长库龄金额"] or 0))
+    staff_behind = [r for r in attr["staff"] if r.get("达成率") is not None and float(r["达成率"]) < 0.6]
 
+    if behind:
+        worst = behind[0]
+        store_gaps = [g for g in gaps if g["门店"] == worst["门店"]][:2]
+        gap_text = "、".join(f"{g['考核项']}（差 {g['差额']:,.0f} 元）" for g in store_gaps)
+        tips.append(f"{worst['门店']}毛利达成 {worst['达成率']:.0%}，差距最大，"
+                    + (f"优先补{gap_text}，" if gap_text else "")
+                    + "对照本月门店指导书的产品政策，主推进店毛利高、有 SO 激励的机型。")
+    if focus == "stock" or long_stock:
+        if long_stock:
+            r = long_stock[0]
+            tips.append(f"{r['门店']}长库龄库存 {int(r['长库龄数量'] or 0)} 件、{_wan(float(r['长库龄金额'] or 0))}，"
+                        "按清尾明细的分值规则安排清尾，演示机和融合类商品优先。")
+    if focus == "staff" or staff_behind:
+        if staff_behind:
+            names = "、".join(f"{r['门店']}{r['店员']}" for r in staff_behind[:3])
+            tips.append(f"{names}个人毛利达成不足 60%，复盘成交结构，提高增值业务（碎屏宝、延长保）、膜和旧机回收的连带率。")
+    if not tips or len(tips) < 3:
+        tips.append("每周用同一口径（销售额、毛利、手机台数、毛利达成率）复盘各门店，月中按进度预估月底达成，提前调整主推机型。")
+    if progress < 1 and len(tips) < 3:
+        tips.append(f"当前数据只覆盖本月 {progress:.0%} 的天数，预计达成率按日均推算，月底前请以最新台账复核。")
+    return tips[:4]
 
-def _recommendations_for(
-    focus: str,
-    top_region: dict[str, Any] | None,
-    top_refund: dict[str, Any] | None,
-    top_roi: dict[str, Any] | None,
-    focus_region: str | None,
-) -> list[str]:
-    channel = top_roi["渠道"] if top_roi else "ROI 下滑渠道"
-    category = top_refund["品类"] if top_refund else "高退款品类"
-    province = top_region["省份"] if top_region else "重点省份"
-    region = focus_region or "重点大区"
-    if focus == "roi":
-        return [
-            f"优先复盘{channel}的投放人群、素材和落地页转化，暂停低 ROI 单元继续放量。",
-            "用净销售额而不是 GMV 评估渠道效果，把退款影响纳入预算分配。",
-            "保留小流量 A/B 测试，按周观察 ROI、转化率和客单价是否同步修复。",
-        ]
-    if focus == "refund":
-        return [
-            f"对{category}抽样查看退款原因，区分质量、物流、描述不符和价格保护问题。",
-            "把退款率、退款金额和毛利率放到同一张周报里，避免只看 GMV。",
-            "对异常 SKU 设置售后预警阈值，必要时降低投放或临时下架问题批次。",
-        ]
-    if focus == "region":
-        return [
-            f"优先检查{province}的高价值用户复购、渠道转化和热销品供给是否同时走弱。",
-            f"针对{region}做分渠道漏斗复盘，定位是访问下降、转化下降还是客单价下降。",
-            "对高价值用户做定向召回，不建议先进行全站大额促销。",
-        ]
-    return [
-        f"优先复盘{province}（{region}）市场的商品供给、价格策略和投放转化漏斗。",
-        f"对{category}做售后原因拆解，单独监控退款金额对净销售额和毛利率的影响。",
-        f"将预算从{channel}等 ROI 下滑渠道阶段性转向 ROI 稳定的渠道，并按周复盘。",
-    ]
 
 
 def _html_report(detail: dict[str, Any], markdown: str) -> str:

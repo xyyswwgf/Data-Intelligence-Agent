@@ -15,6 +15,7 @@ const TOOL_META = {
   analyze_imported_table: { label: "分析导入表", icon: "chart" },
   remember: { label: "写入记忆", icon: "bulb" },
   use_skill: { label: "加载技能", icon: "bulb" },
+  python_analysis: { label: "Python 分析", icon: "code" },
 };
 
 const PART_LABEL = {
@@ -62,8 +63,40 @@ function ContextBar({ ctx }) {
   );
 }
 
+function chartConfigFrom(display) {
+  const spec = display.chart;
+  if (spec && spec.x && display.columns?.includes(spec.x)) {
+    const y = (Array.isArray(spec.y) ? spec.y : [spec.y]).filter((c) => display.columns.includes(c));
+    if (y.length) return { chartType: spec.type === "line" ? "line" : "bar", xAxis: spec.x, yAxis: y };
+  }
+  return detectChartConfig(display.columns, display.data);
+}
+
+function PythonDisplay({ display }) {
+  return (
+    <div className="tool-display">
+      <details className="code-details">
+        <summary><Icon name="code" size={13} /> 代码与取数 SQL（输入 {display.input_rows ?? "—"} 行{display.input_truncated ? "，已截断" : ""}）</summary>
+        <pre className="sql-code">{display.sql}</pre>
+        <pre className="sql-code python-code">{display.code}</pre>
+      </details>
+      {display.problems && <div className="callout danger"><Icon name="alert" size={14} /><span>{display.problems.join("；")}</span></div>}
+      {display.error && <div className="callout danger"><Icon name="alert" size={14} /><span>{display.error}</span></div>}
+      {display.stdout && <pre className="stdout-block">{display.stdout}</pre>}
+      {display.columns && (
+        <>
+          <ResultChart columns={display.columns} data={display.data} chartConfig={chartConfigFrom(display)} />
+          <ResultTable columns={display.columns} data={display.data} truncated={display.truncated} />
+        </>
+      )}
+      {display.value !== undefined && <pre className="stdout-block">{JSON.stringify(display.value, null, 2)}</pre>}
+    </div>
+  );
+}
+
 function ToolDisplay({ display }) {
   if (!display) return null;
+  if (display.python) return <PythonDisplay display={display} />;
   if (display.columns) {
     const chartConfig = detectChartConfig(display.columns, display.data);
     return (
@@ -105,9 +138,11 @@ function ToolStep({ call, result }) {
   const [open, setOpen] = useState(false);
   const meta = TOOL_META[call.name] || { label: call.name, icon: "code" };
   const status = !result ? "running" : result.ok ? "ok" : "bad";
-  const argText = call.name === "run_sql" ? call.args.purpose || call.args.sql : Object.values(call.args || {}).join(" · ");
+  const argText = ["run_sql", "python_analysis"].includes(call.name)
+    ? call.args.purpose || call.args.sql
+    : Object.values(call.args || {}).join(" · ");
   const expandable = result && (result.display?.columns || result.display?.analysis || result.display?.citations?.length
-    || result.display?.sql || result.display?.http);
+    || result.display?.sql || result.display?.http || result.display?.python);
   return (
     <li className={`trace-tool ${status}`}>
       <button type="button" className="trace-tool-head" onClick={() => expandable && setOpen(!open)} disabled={!expandable}>
@@ -121,6 +156,7 @@ function ToolStep({ call, result }) {
         {expandable && <Icon name="chevron" size={13} className={`trace-chevron ${open ? "open" : ""}`} />}
       </button>
       {call.name === "run_sql" && call.args.sql && open && <pre className="sql-code trace-sql">{call.args.sql}</pre>}
+      {call.name === "python_analysis" && !result && <pre className="sql-code trace-sql python-code">{call.args.code}</pre>}
       {open && <ToolDisplay display={result?.display} />}
     </li>
   );

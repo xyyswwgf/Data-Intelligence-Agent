@@ -91,19 +91,34 @@ def read_csv(
     combine_header_rows: int = 1,
 ) -> ParsedCsv:
     """解析 CSV 原始字节，返回表头、数据行以及实际使用的编码/分隔符/行号。"""
-    combine_header_rows = max(1, combine_header_rows)
     text_content, encoding = detect_encoding(file_bytes)
     logger.info("CSV 编码: %s", encoding)
     if not text_content.strip():
         raise ValueError("CSV 文件为空。")
-
-    # ── 解析 ──
     delimiter = _detect_delimiter(text_content)
     reader = csv.reader(io.StringIO(text_content, newline=""), delimiter=delimiter)
-    # 使用逻辑行号（csv.reader 已处理好引号内的换行），过滤空行后 1-based 编号
-    logical_rows = [row for row in reader if any(c.strip() for c in row)]
+    return read_rows(list(reader), encoding, delimiter, has_header, header_row, data_start_row,
+                     skip_trailing_rows, combine_header_rows)
+
+
+def read_rows(
+    raw_rows: list[list[str]],
+    encoding: str,
+    delimiter: str,
+    has_header: bool = True,
+    header_row: int = 1,
+    data_start_row: int | None = None,
+    skip_trailing_rows: int = 0,
+    combine_header_rows: int = 1,
+) -> ParsedCsv:
+    """
+    表格行 → 表头 + 数据行（CSV 与 Excel 共用）：自动检测表头行、合并多行表头、跳过末尾非数据行。
+    行号均为过滤空行后的逻辑行号（1-based）。
+    """
+    combine_header_rows = max(1, combine_header_rows)
+    logical_rows = [row for row in raw_rows if any(str(c).strip() for c in row)]
     if not logical_rows:
-        raise ValueError("CSV 文件没有有效内容。")
+        raise ValueError("文件没有有效内容。")
 
     total_lines = len(logical_rows)
 

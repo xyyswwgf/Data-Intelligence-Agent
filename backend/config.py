@@ -116,6 +116,12 @@ APP_DATA_DIR = os.getenv("APP_DATA_DIR", os.path.dirname(KB_STORAGE_DIR))
 TOOL_HTTP_ALLOWED_HOSTS = {h.strip().lower() for h in os.getenv("TOOL_HTTP_ALLOWED_HOSTS", "").split(",") if h.strip()}
 TOOL_HTTP_TIMEOUT_SECONDS = float(os.getenv("TOOL_HTTP_TIMEOUT_SECONDS", "15"))
 
+# ── Python 分析沙箱（智能助手的 python_analysis 工具）──
+PYTHON_SANDBOX_ENABLED = os.getenv("PYTHON_SANDBOX_ENABLED", "true").lower() in {"1", "true", "yes"}
+PYTHON_SANDBOX_TIMEOUT_SECONDS = int(os.getenv("PYTHON_SANDBOX_TIMEOUT_SECONDS", "20"))
+PYTHON_SANDBOX_MEMORY_MB = int(os.getenv("PYTHON_SANDBOX_MEMORY_MB", "1024"))
+PYTHON_SANDBOX_MAX_ROWS = int(os.getenv("PYTHON_SANDBOX_MAX_ROWS", "50000"))
+
 # ── Web 配置 ──
 CORS_ORIGINS = [
     o.strip()

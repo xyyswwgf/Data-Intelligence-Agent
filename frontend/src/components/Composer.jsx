@@ -54,12 +54,12 @@ export default function Composer({
   const placeholder = mode === "assistant"
     ? targetTable ? `问问关于 ${targetTable} 的任何问题` : "问任何业务问题，我会自己查资料、查数据、推理后回答"
     : mode === "kb"
-    ? "向企业知识库提问，例如：GMV 的统计口径是什么？"
+    ? "向企业知识库提问，例如：8 月 Magic8 Pro 的提成是多少？"
     : targetTable && mode === "agent"
     ? `针对 ${targetTable} 提问，例如：这个表按月份有什么变化？`
     : mode === "agent"
-      ? "描述你的业务问题，例如：本月销售额为什么下降？"
-      : "用自然语言查数据，例如：每个品类的销售额是多少？";
+      ? "描述你的业务问题，例如：本月各门店毛利目标达成怎么样？"
+      : "用自然语言查数据，例如：每个门店 8 月的销售额和毛利";
 
   return (
     <div className={`composer ${loading ? "is-busy" : ""}`}>

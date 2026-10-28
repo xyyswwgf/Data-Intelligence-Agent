@@ -60,7 +60,7 @@ export default function DataDrawer({ open, onClose, info, onImportComplete, onQu
         <header className="drawer-head">
           <div className="segmented">
             <button type="button" className={tab === "import" ? "active" : ""} onClick={() => setTab("import")}>
-              <Icon name="upload" size={14} /> 导入 CSV
+              <Icon name="upload" size={14} /> 导入数据
             </button>
             <button type="button" className={tab === "source" ? "active" : ""} onClick={() => setTab("source")}>
               <Icon name="database" size={14} /> 数据源

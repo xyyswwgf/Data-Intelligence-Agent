@@ -67,11 +67,17 @@ function CsvPreviewModal({ preview, file, onConfirm, onCancel, onRefresh, import
       dataStartRow: dataStartRow,
       combineHeaders: combineHeaders,
       skipTrailing: skipTrailing,
+      sheetName: preview.selected_sheet || null,
     });
   };
 
   const handleRefresh = () => {
-    if (onRefresh) onRefresh(headerRow, dataStartRow, combineHeaders, skipTrailing);
+    if (onRefresh) onRefresh(headerRow, dataStartRow, combineHeaders, skipTrailing, preview.selected_sheet);
+  };
+
+  // 切换工作表：表头、数据起始行、末尾行全部重新自动识别
+  const handleSheetChange = (sheet) => {
+    if (onRefresh) onRefresh(0, 0, 1, undefined, sheet);
   };
 
   return (
@@ -83,6 +89,14 @@ function CsvPreviewModal({ preview, file, onConfirm, onCancel, onRefresh, import
             <span>📄 {file.name}</span>
             <span>📝 {preview.total_rows} 行 × {preview.total_cols} 列</span>
             <span>🔤 {preview.encoding.toUpperCase()}</span>
+            {preview.sheets?.length > 1 && (
+              <label className="sheet-picker">
+                工作表
+                <select value={preview.selected_sheet} onChange={(e) => handleSheetChange(e.target.value)} disabled={importing}>
+                  {preview.sheets.map((s) => <option key={s} value={s}>{s}</option>)}
+                </select>
+              </label>
+            )}
           </div>
         </div>
 
@@ -364,7 +378,7 @@ export default function CsvUploader({ onImportComplete, onQueryTable, onAnalyzeT
   useEffect(() => { loadTables(); }, [loadTables]);
 
   // ── 文件选择 → 先预览 ──
-  const handleFilePicked = async (file, hr, dsr, ch, st) => {
+  const handleFilePicked = async (file, hr, dsr, ch, st, sheet) => {
     setError(null);
     setResult(null);
     setConflict(null);
@@ -376,6 +390,7 @@ export default function CsvUploader({ onImportComplete, onQueryTable, onAnalyzeT
       if (dsr) opts.dataStartRow = dsr;
       if (ch) opts.combineHeaders = ch;
       if (st !== undefined) opts.skipTrailing = st;
+      if (sheet) opts.sheetName = sheet;
       const data = await previewCsv(file, opts);
       setPreview(data);
       setPreviewSeq((n) => n + 1);
@@ -389,8 +404,8 @@ export default function CsvUploader({ onImportComplete, onQueryTable, onAnalyzeT
   };
 
   // ── 预览中调整 → 重新预览 ──
-  const handleRefreshPreview = async (hr, dsr, ch, st) => {
-    if (previewFile) await handleFilePicked(previewFile, hr, dsr, ch, st);
+  const handleRefreshPreview = async (hr, dsr, ch, st, sheet) => {
+    if (previewFile) await handleFilePicked(previewFile, hr, dsr, ch, st, sheet);
   };
 
   // ── 预览确认 → 正式导入 ──
@@ -416,6 +431,7 @@ export default function CsvUploader({ onImportComplete, onQueryTable, onAnalyzeT
         dataStartRow: config.dataStartRow || null,
         combineHeaders: config.combineHeaders || null,
         skipTrailing: config.skipTrailing || 0,
+        sheetName: config.sheetName || null,
       };
       const data = await importCsv(file, opts);
       setResult(data);
@@ -472,8 +488,8 @@ export default function CsvUploader({ onImportComplete, onQueryTable, onAnalyzeT
     e.preventDefault(); e.stopPropagation(); setDragOver(false);
     const files = e.dataTransfer.files;
     if (files.length > 0) {
-      if (files[0].name.toLowerCase().endsWith(".csv")) handleFilePicked(files[0]);
-      else setError("仅支持 .csv 格式的文件");
+      if (/\.(csv|xlsx|xlsm)$/i.test(files[0].name)) handleFilePicked(files[0]);
+      else setError("仅支持 .csv 和 .xlsx 格式的文件（旧版 .xls 请先另存为 .xlsx）");
     }
   };
   const handleFileSelect = (e) => {
@@ -497,13 +513,13 @@ export default function CsvUploader({ onImportComplete, onQueryTable, onAnalyzeT
           onDragEnter={handleDragEnter} onDragOver={handleDragOver}
           onDragLeave={handleDragLeave} onDrop={handleDrop}
           onClick={() => fileInputRef.current?.click()}>
-          <input ref={fileInputRef} type="file" accept=".csv,text/csv"
+          <input ref={fileInputRef} type="file" accept=".csv,text/csv,.xlsx,.xlsm,application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
             style={{ display: "none" }} onChange={handleFileSelect} disabled={uploading} />
           {!uploading && !result && (
             <>
               <div className="drop-icon"><Icon name="upload" size={26} /></div>
-              <div className="drop-text">拖拽 CSV 文件到这里，或点击选择文件</div>
-              <div className="drop-hint">支持 UTF-8 / GBK 编码，最大 10MB，自动识别列类型</div>
+              <div className="drop-text">拖拽 CSV 或 Excel 文件到这里，或点击选择文件</div>
+              <div className="drop-hint">支持 .csv（UTF-8 / GBK）和 .xlsx（可选工作表），最大 10MB，自动识别表头和列类型</div>
             </>
           )}
           {uploading && !preview && (

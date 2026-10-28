@@ -45,8 +45,10 @@ from backend.database import (
     table_exists,
     drop_table,
 )
+from backend.excel_importer import is_excel, read_excel
 from backend.csv_importer import (
     read_csv,
+    read_rows,
     sanitize_column_name,
     infer_column_types,
     profile_import_file,
@@ -60,7 +62,7 @@ from backend.agent_service import run_analysis, list_history, get_history_detail
 from backend import auth
 from backend.auth import CurrentUser, get_current_user, require_role
 from backend.migrations import run_migrations
-from backend.routers import agent_admin_routes, auth_routes, chat_routes, kb_routes
+from backend.routers import agent_admin_routes, auth_routes, chat_routes, kb_routes, store_data_routes
 from backend.generic_table_agent import run_table_analysis
 from backend.config import (
     CORS_ORIGINS,
@@ -124,6 +126,7 @@ app.add_middleware(
 
 app.include_router(auth_routes.router)
 app.include_router(kb_routes.router)
+app.include_router(store_data_routes.router)
 app.include_router(chat_routes.router)
 app.include_router(agent_admin_routes.router)
 
@@ -229,8 +232,8 @@ def _load_table_details(imported_only: bool = False) -> list[dict]:
 
 def _read_upload(file: UploadFile) -> tuple[str, bytes]:
     filename = file.filename or "unknown.csv"
-    if not filename.lower().endswith(".csv"):
-        raise HTTPException(status_code=400, detail="仅支持 .csv 格式的文件")
+    if not (filename.lower().endswith(".csv") or is_excel(filename)):
+        raise HTTPException(status_code=400, detail="仅支持 .csv 和 .xlsx 格式的文件")
     max_bytes = CSV_MAX_FILE_SIZE_MB * 1024 * 1024
     try:
         # 多读 1 字节即可判断是否超限，避免把超大文件整个读进内存
@@ -240,6 +243,22 @@ def _read_upload(file: UploadFile) -> tuple[str, bytes]:
     if len(file_bytes) > max_bytes:
         raise HTTPException(status_code=413, detail=f"文件大小超过限制（最大 {CSV_MAX_FILE_SIZE_MB}MB）")
     return filename, file_bytes
+
+
+def _table_source_name(filename: str, excel_info: dict) -> str:
+    """多工作表的 Excel 用「文件名_工作表名」推导默认表名，避免不同工作表导入时重名。"""
+    if len(excel_info.get("sheets", [])) > 1:
+        return f"{filename.rsplit('.', 1)[0]}_{excel_info['selected_sheet']}.xlsx"
+    return filename
+
+
+def _parse_upload(filename: str, file_bytes: bytes, sheet_name: str | None, **options):
+    """CSV 与 Excel 统一解析为 ParsedCsv；Excel 额外返回工作表列表。"""
+    if is_excel(filename):
+        raw_rows, sheets, selected = read_excel(file_bytes, sheet_name)
+        parsed = read_rows(raw_rows, "xlsx", "sheet", **options)
+        return parsed, {"sheets": sheets, "selected_sheet": selected}
+    return read_csv(file_bytes, **options), {}
 
 
 # ---------------------------------------------------------------------------
@@ -453,15 +472,16 @@ def preview_csv(
     data_start_row: int = Form(0, description="数据起始行号（0=自动）"),
     skip_trailing: int = Form(-1, description="跳过末尾行数（-1=自动检测）"),
     combine_headers: int = Form(1, ge=1, le=10, description="合并表头行数"),
+    sheet_name: str | None = Form(None, description="Excel 工作表名（默认第一个）"),
     user: CurrentUser = Depends(require_role("editor")),
 ):
-    """预览 CSV 文件（不创建表），自动检测编码、表头行和末尾非数据行"""
+    """预览 CSV / Excel 文件（不创建表），自动检测编码、表头行和末尾非数据行"""
     filename, file_bytes = _read_upload(file)
 
-    # ── 解析 CSV ──
+    # ── 解析 ──
     try:
-        parsed = read_csv(
-            file_bytes,
+        parsed, excel_info = _parse_upload(
+            filename, file_bytes, sheet_name,
             has_header=True,
             header_row=max(header_row, 0),
             data_start_row=data_start_row if data_start_row > 0 else None,
@@ -488,7 +508,7 @@ def preview_csv(
     clean_headers = [sanitize_column_name(h, used_names) for h in headers]
     column_types = infer_column_types(clean_headers, rows)
     file_profile = profile_import_file(
-        filename,
+        _table_source_name(filename, excel_info),
         headers,
         clean_headers,
         rows,
@@ -509,6 +529,7 @@ def preview_csv(
         })
 
     return {
+        **excel_info,
         "encoding": parsed.encoding,
         "delimiter": parsed.delimiter,
         "total_rows": len(rows),
@@ -541,6 +562,7 @@ def import_csv(
     column_names: str | None = Form(None, description="自定义列名 JSON数组"),
     column_types_override: str | None = Form(None, description="自定义列类型 JSON对象（可选）"),
     primary_key_column: str | None = Form(None, description="指定主键列名（可选，不指定则自动生成_id）"),
+    sheet_name: str | None = Form(None, description="Excel 工作表名（默认第一个）"),
     user: CurrentUser = Depends(require_role("editor")),
 ):
     """
@@ -551,10 +573,10 @@ def import_csv(
     original_filename, file_bytes = _read_upload(file)
     logger.info("收到 CSV 上传: %s (%.2f MB)", original_filename, len(file_bytes) / (1024 * 1024))
 
-    # ── 解析 CSV ──
+    # ── 解析 ──
     try:
-        parsed = read_csv(
-            file_bytes,
+        parsed, excel_info = _parse_upload(
+            original_filename, file_bytes, sheet_name,
             has_header=has_header,
             header_row=max(header_row, 0),
             data_start_row=data_start_row if data_start_row > 0 else None,
@@ -603,7 +625,7 @@ def import_csv(
             raise HTTPException(status_code=400, detail=f"主键列 '{primary_key_column}' 不存在")
 
     # ── 表名处理 ──
-    clean_table = normalize_table_name(table_name) if table_name and table_name.strip() else derive_table_name(original_filename)
+    clean_table = normalize_table_name(table_name) if table_name and table_name.strip() else derive_table_name(_table_source_name(original_filename, excel_info))
 
     # ── 表名冲突 ──
     if table_exists(clean_table) and not overwrite:
@@ -639,7 +661,7 @@ def import_csv(
 
     logger.info("CSV 导入成功: %s → %d 行", clean_table, inserted)
     auth.audit("csv_import", user, "table", clean_table,
-               {"filename": original_filename, "rows": inserted, "overwrite": overwrite})
+               {"filename": original_filename, "sheet": excel_info.get("selected_sheet"), "rows": inserted, "overwrite": overwrite})
     return ImportResponse(
         table_name=clean_table,
         original_filename=original_filename,

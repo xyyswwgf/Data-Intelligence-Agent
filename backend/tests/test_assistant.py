@@ -67,9 +67,9 @@ def _of(events, kind):
 
 def test_react_loop_self_corrects_sql_and_verifies_citations(user):
     provider = ScriptedProvider([
-        LLMResponse(reasoning="先查表结构", tool_calls=[ToolCall("c1", "run_sql", {"sql": 'SELECT "no_col" FROM fact_orders'})]),
+        LLMResponse(reasoning="先查表结构", tool_calls=[ToolCall("c1", "run_sql", {"sql": 'SELECT "no_col" FROM fact_store_sales'})]),
         # 第二步：模型应该看到上一步的报错并修正
-        lambda call: LLMResponse(tool_calls=[ToolCall("c2", "run_sql", {"sql": 'SELECT COUNT(*) AS "订单数" FROM fact_orders'})])
+        lambda call: LLMResponse(tool_calls=[ToolCall("c2", "run_sql", {"sql": 'SELECT COUNT(*) AS "订单数" FROM fact_store_sales'})])
         if "no_col" in call["messages"][-1]["content"] else LLMResponse(text="没有看到报错"),
         LLMResponse(text="共有 7190 笔订单 [[不存在的页面]]。"),
     ])
@@ -108,10 +108,10 @@ def test_step_limit_forces_final_answer(user, monkeypatch):
 
 def test_rule_fallback_without_llm(user):
     set_provider(Unconfigured())
-    _, events = _run(user, "本月销售额为什么下降？")
+    _, events = _run(user, "本月各门店毛利达成怎么样？")
     assert _of(events, "tool_call")[0]["name"] == "business_analysis"
     done = _of(events, "done")[0]
-    assert "GMV" in done["content"]
+    assert "毛利" in done["content"] and "达成" in done["content"]
 
 
 def test_explicit_memory_and_recall_into_context(user):

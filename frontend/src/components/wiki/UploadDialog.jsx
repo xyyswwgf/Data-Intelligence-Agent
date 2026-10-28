@@ -2,11 +2,15 @@ import { useRef, useState } from "react";
 import Icon from "../Icon";
 import { uploadKnowledgeDocument } from "../../api";
 import { extractErrorMessage } from "../../utils/format";
+import { STORE_DATA_ACCEPT, isStoreDataFile } from "./storeDataFiles";
 
-const ACCEPT = ".md,.markdown,.txt,.pdf,.docx";
+const ACCEPT = `.md,.markdown,.txt,.pdf,.docx,${STORE_DATA_ACCEPT}`;
 
-/** 批量上传文档：逐个上传，每个文件独立显示结果（成功 / 重复 / 失败原因） */
-export default function UploadDialog({ pages, defaultParentId, onClose, onDone, onOpen }) {
+/**
+ * 批量上传文档：逐个上传，每个文件独立显示结果（成功 / 重复 / 失败原因）。
+ * Excel（销售台账、收款明细等）转到门店数据导入，数字写入数据表而不是切成文本片段。
+ */
+export default function UploadDialog({ pages, defaultParentId, onClose, onDone, onOpen, onStoreData }) {
   const [files, setFiles] = useState([]);
   const [parentId, setParentId] = useState(defaultParentId ?? "");
   const [tags, setTags] = useState("");
@@ -15,7 +19,15 @@ export default function UploadDialog({ pages, defaultParentId, onClose, onDone, 
   const inputRef = useRef(null);
 
   const addFiles = (list) => {
-    const incoming = Array.from(list).map((file) => ({ file, status: "pending", message: "" }));
+    const all = Array.from(list);
+    const excel = all.filter(isStoreDataFile);
+    if (excel.length && !files.length && excel.length === all.length) {
+      onStoreData(excel);
+      return;
+    }
+    const incoming = all.map((file) => (isStoreDataFile(file)
+      ? { file, status: "excel", message: "" }
+      : { file, status: "pending", message: "" }));
     setFiles((prev) => [...prev, ...incoming]);
   };
 
@@ -43,6 +55,7 @@ export default function UploadDialog({ pages, defaultParentId, onClose, onDone, 
   };
 
   const pendingCount = files.filter((f) => f.status === "pending").length;
+  const excelFiles = files.filter((f) => f.status === "excel").map((f) => f.file);
 
   return (
     <div className="conflict-overlay" onClick={() => !running && onClose()}>
@@ -61,7 +74,7 @@ export default function UploadDialog({ pages, defaultParentId, onClose, onDone, 
           <input ref={inputRef} type="file" multiple accept={ACCEPT} style={{ display: "none" }} onChange={(e) => { addFiles(e.target.files); e.target.value = ""; }} />
           <div className="drop-icon"><Icon name="upload" size={26} /></div>
           <div className="drop-text">拖拽文件到这里，或点击选择（可多选）</div>
-          <div className="drop-hint">Markdown / TXT / PDF / Word(.docx)，统一转换为 Wiki 页面并建立检索索引</div>
+          <div className="drop-hint">Markdown / TXT / PDF / Word(.docx)，统一转换为 Wiki 页面并建立检索索引；Excel 门店数据自动转到「导入门店数据」</div>
         </div>
         <div className="editor-meta">
           <label>
@@ -88,10 +101,20 @@ export default function UploadDialog({ pages, defaultParentId, onClose, onDone, 
                   {f.status === "done" && <button type="button" className="text-link" onClick={() => onOpen(f.slug)}>已生成页面「{f.message}」</button>}
                   {f.status === "duplicate" && <button type="button" className="text-link" onClick={() => f.slug && onOpen(f.slug)}>{f.message}</button>}
                   {f.status === "error" && f.message}
+                  {f.status === "excel" && "门店数据，需用「导入门店数据」"}
                 </span>
               </li>
             ))}
           </ul>
+        )}
+        {excelFiles.length > 0 && !running && (
+          <div className="callout info">
+            <Icon name="database" size={16} />
+            <span>
+              Excel 文件不切成文本片段，而是写入门店数据表供分析，指导书另外生成知识库页面。
+              <button type="button" className="text-link" onClick={() => onStoreData(excelFiles)}>导入这 {excelFiles.length} 个 Excel</button>
+            </span>
+          </div>
         )}
         <div className="preview-actions">
           <button type="button" className="btn-secondary" onClick={onClose} disabled={running}>关闭</button>
