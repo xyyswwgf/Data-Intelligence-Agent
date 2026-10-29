@@ -68,7 +68,7 @@ function AgentCharts({ charts }) {
 // 归因
 // ---------------------------------------------------------------------------
 
-// 对比型归因（上期 / 本期 / 变化）
+// 对比型归因（上期 / 本期 / 变化）；region / roi 等用于展示旧版电商演示的历史分析
 const COMPARE_SECTIONS = [
   { key: "region", title: "地区 GMV 归因", label: "省份", value: "change", icon: "map" },
   { key: "category", title: "品类 GMV 归因", label: "品类", value: "change", icon: "chart" },
@@ -136,7 +136,7 @@ function RowsCard({ title, rows }) {
           {rows.slice(0, 10).map((row, index) => (
             <tr key={index}>
               {columns.map((col) => (
-                <td key={col}>{col.includes("率") ? formatPercent(row[col]) : formatCell(row[col])}</td>
+                <td key={col}>{/率|占比/.test(col) ? formatPercent(row[col]) : formatCell(row[col])}</td>
               ))}
             </tr>
           ))}
@@ -154,6 +154,10 @@ function AttributionPanel({ attribution }) {
   const tableCards = Object.entries(TABLE_SECTIONS)
     .filter(([key]) => attribution[key]?.length)
     .map(([key, title]) => <RowsCard key={key} title={title} rows={attribution[key]} />);
+  // 门店经营分析直接给出 [{title, rows}]
+  (attribution.tables || [])
+    .filter((table) => table.rows?.length)
+    .forEach((table) => tableCards.push(<RowsCard key={table.title} title={table.title} rows={table.rows} />));
   if (!compareCards.length && !tableCards.length) return null;
   return (
     <div className="panel-grid">
@@ -250,7 +254,10 @@ export function AgentAnswer({ result }) {
           <div className="summary-meta">
             {result.period?.current && (
               <span className="tag">
-                {result.period.previous} → {result.period.current}
+                {result.period.previous && result.period.previous !== result.period.current
+                  ? `${result.period.previous} → ${result.period.current}`
+                  : result.period.current}
+                {result.period.last_day ? ` · 数据截至 ${result.period.last_day}` : ""}
               </span>
             )}
             {result.table_name && <span className="tag">{result.table_name}</span>}

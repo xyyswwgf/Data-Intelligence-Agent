@@ -4,18 +4,19 @@ import DataDrawer from "./components/DataDrawer";
 import Icon from "./components/Icon";
 import ChatView from "./components/ChatView";
 import LoginPage from "./components/LoginPage";
-import AdminView from "./components/AdminView";
-import MemoryView from "./components/MemoryView";
+import SettingsView from "./components/settings/SettingsView";
+import DiscoverView from "./components/discover/DiscoverView";
+import { DISCOVER_SECTIONS, LEGACY_ADMIN_SECTIONS, MODE_OPTIONS, SETTINGS_SECTIONS } from "./navigation";
 import WikiView from "./components/wiki/WikiView";
 import { detectChartConfig } from "./utils/chartDetector";
 import { extractErrorMessage } from "./utils/format";
 import {
-  changePassword,
   createChatSession,
   deleteChatSession,
   getChatSession,
   getMe,
   getModelOptions,
+  getMyAccount,
   getSkillOptions,
   getToken,
   listChatSessions,
@@ -28,13 +29,16 @@ import "./App.css";
 let turnSeq = 0;
 const nextTurnId = () => `turn-${Date.now()}-${turnSeq++}`;
 
-// ── 极简 hash 路由：#/ 新对话，#/chat/<id> 会话，#/wiki[/<slug>] 知识库，#/memory 我的记忆，#/admin 系统管理 ──
+// ── 极简 hash 路由 ──
+//   #/ 新对话，#/chat/<id> 会话，#/wiki[/<slug>] 知识库，#/discover[/<分类>] 发现，#/settings[/<分区>] 设置
+//   旧的 #/admin/<分区> 转到对应的设置分区
 function parseHash() {
   const hash = window.location.hash.replace(/^#\/?/, "");
   const [section, ...rest] = hash.split("/");
   if (section === "wiki") return { view: "wiki", slug: rest.length ? decodeURIComponent(rest.join("/")) : null };
-  if (section === "admin") return { view: "admin" };
-  if (section === "memory") return { view: "memory" };
+  if (section === "discover") return { view: "discover", section: rest[0] || DISCOVER_SECTIONS[0].id };
+  if (section === "settings") return { view: "settings", section: rest[0] || SETTINGS_SECTIONS[0].id };
+  if (section === "admin") return { view: "settings", section: LEGACY_ADMIN_SECTIONS[rest[0]] || "members" };
   if (section === "chat" && rest[0]) return { view: "chat", sessionId: rest[0] };
   return { view: "chat", sessionId: null };
 }
@@ -77,12 +81,38 @@ function messagesToTurns(messages) {
   return turns.map((t) => (t.status === "pending" ? { ...t, status: "error", error: "这条消息没有完成，请重新提问。" } : t));
 }
 
+// 只用于记住个人偏好；隐私模式下读写失败不影响使用
+function readPref(key, fallback) {
+  try {
+    return localStorage.getItem(key) ?? fallback;
+  } catch {
+    return fallback;
+  }
+}
+
+function writePref(key, value) {
+  try {
+    if (value == null) localStorage.removeItem(key);
+    else localStorage.setItem(key, String(value));
+  } catch {
+    // 忽略
+  }
+}
+
 function App() {
   const [user, setUser] = useState(null);
   const [authChecked, setAuthChecked] = useState(() => !getToken());
+  const [loginNotice, setLoginNotice] = useState(null);
   const [route, navigate] = useHashRoute();
 
-  const [mode, setMode] = useState("assistant");
+  const [defaultMode, setDefaultModeState] = useState(() => {
+    const saved = readPref("datamind.mode", "assistant");
+    return MODE_OPTIONS.some((m) => m.id === saved) ? saved : "assistant";
+  });
+  const [mode, setMode] = useState(defaultMode);
+  const [account, setAccount] = useState(null); // 当前方案、额度与余额（用户菜单和设置共用）
+  const lastAppPath = useRef("/"); // 从设置「返回应用」时回到的位置
+  const [slot, setSlot] = useState(null); // 侧边栏里留给知识库 / 系统管理导航的位置
   const [turns, setTurns] = useState([]);
   const [loadedSessionId, setLoadedSessionId] = useState(null);
   const [sessionList, setSessionList] = useState([]);
@@ -94,21 +124,17 @@ function App() {
   const [skills, setSkills] = useState([]);
   const [skill, setSkill] = useState(null);
   const [modelId, setModelIdState] = useState(() => {
-    try {
-      const saved = localStorage.getItem("datamind.model");
-      return saved ? Number(saved) : null;
-    } catch {
-      return null;
-    }
+    const saved = readPref("datamind.model", null);
+    return saved ? Number(saved) : null;
   });
   const setModelId = (id) => {
     setModelIdState(id);
-    try {
-      if (id == null) localStorage.removeItem("datamind.model");
-      else localStorage.setItem("datamind.model", String(id));
-    } catch {
-      // 隐私模式下无法记住选择，不影响使用
-    }
+    writePref("datamind.model", id);
+  };
+  const setDefaultMode = (value) => {
+    setDefaultModeState(value);
+    setMode(value);
+    writePref("datamind.mode", value);
   };
   // 正在流式写入的会话：路由切到它时不要用服务端数据覆盖本地的实时轮次
   const streamingSessionRef = useRef(null);
@@ -127,6 +153,19 @@ function App() {
     return () => window.removeEventListener("auth:expired", onExpired);
   }, []);
 
+  // ⌘, / Ctrl+, 打开设置
+  useEffect(() => {
+    if (!user) return undefined;
+    const onKey = (e) => {
+      if ((e.metaKey || e.ctrlKey) && e.key === ",") {
+        e.preventDefault();
+        window.location.hash = "/settings/general";
+      }
+    };
+    window.addEventListener("keydown", onKey);
+    return () => window.removeEventListener("keydown", onKey);
+  }, [user]);
+
   const fetchInfo = useCallback(() => {
     apiClient.get("/api/info").then((res) => setSourceInfo(res.data)).catch(() => setSourceInfo(null));
   }, []);
@@ -139,9 +178,31 @@ function App() {
     if (!user) return;
     fetchInfo();
     fetchSessions();
+  }, [user, fetchInfo, fetchSessions, route.view]);
+
+  // 可选模型和技能受「发现」中的启用状态影响，切换模块和修改启用状态后重新获取
+  const fetchOptions = useCallback(() => {
     getModelOptions().then((d) => setModels(d.items || [])).catch(() => setModels([]));
     getSkillOptions().then((d) => setSkills(d.items || [])).catch(() => setSkills([]));
-  }, [user, fetchInfo, fetchSessions, route.view]);
+  }, []);
+
+  const fetchAccount = useCallback(() => {
+    getMyAccount().then(setAccount).catch(() => setAccount(null));
+  }, []);
+
+  useEffect(() => {
+    if (user) fetchOptions();
+  }, [user, fetchOptions, route.view]);
+
+  // 额度随每次提问变化：任何页面切换都刷新一次（请求很轻）
+  useEffect(() => {
+    if (user) fetchAccount();
+  }, [user, fetchAccount, route]);
+
+  // 记住最后所在的应用页面，设置页的「返回应用」回到这里
+  useEffect(() => {
+    if (route.view !== "settings") lastAppPath.current = window.location.hash.replace(/^#/, "") || "/";
+  }, [route]);
 
   // 路由中的会话 ID 变化时加载该会话
   const routeSessionId = route.view === "chat" ? route.sessionId : undefined;
@@ -225,12 +286,14 @@ function App() {
     } finally {
       streamingSessionRef.current = null;
       fetchSessions();
+      fetchAccount();
     }
   };
 
   const handleNewChat = () => {
     if (loading) return;
     setSidebarOpen(false);
+    setMode(defaultMode);
     navigate("/");
   };
 
@@ -274,63 +337,75 @@ function App() {
     navigate("/");
   };
 
-  const handleChangePassword = async () => {
-    const oldPassword = window.prompt("请输入当前密码：");
-    if (!oldPassword) return;
-    const newPassword = window.prompt("请输入新密码（至少 8 位，包含字母和数字）：");
-    if (!newPassword) return;
-    try {
-      await changePassword(oldPassword, newPassword);
-      window.alert("密码已修改，请使用新密码重新登录。");
-      setUser(null);
-    } catch (err) {
-      window.alert(extractErrorMessage(err));
-    }
+  const handlePasswordChanged = () => {
+    setLoginNotice("密码已修改，请使用新密码重新登录。");
+    setUser(null);
+    setTurns([]);
+    setLoadedSessionId(null);
+    navigate("/");
+  };
+
+  const handleLogin = (u) => {
+    setLoginNotice(null);
+    setUser(u);
   };
 
   if (!authChecked) {
     return <div className="login-shell"><span className="orb orb-lg spinning" /></div>;
   }
   if (!user) {
-    return <LoginPage onLogin={setUser} />;
+    return <LoginPage onLogin={handleLogin} notice={loginNotice} />;
   }
 
-  const view = route.view === "admin" && user.role !== "admin" ? "chat" : route.view;
+  const view = route.view;
+  const settingsSection = SETTINGS_SECTIONS.find((x) => x.id === route.section && (!x.admin || user.role === "admin"))
+    || SETTINGS_SECTIONS[0];
+  const discoverSection = DISCOVER_SECTIONS.find((x) => x.id === route.section) || DISCOVER_SECTIONS[0];
   const currentTitle = sessionList.find((s) => s.id === route.sessionId)?.title;
 
   const title =
     view === "wiki" ? (
-      <><Icon name="book" size={15} /> 企业知识库</>
-    ) : view === "admin" ? (
-      <><Icon name="shield" size={15} /> 系统管理</>
-    ) : view === "memory" ? (
-      <><Icon name="bulb" size={15} /> 我的记忆</>
+      <><Icon name="book" size={15} /> 知识库</>
+    ) : view === "discover" ? (
+      <><Icon name="compass" size={15} /> 发现 {discoverSection.id !== "all" && <><span className="crumb-sep">/</span> {discoverSection.label}</>}</>
+    ) : view === "settings" ? (
+      <><Icon name="settings" size={15} /> 设置 <span className="crumb-sep">/</span> {settingsSection.label}</>
     ) : currentTitle ? (
       <><Icon name="history" size={15} /> {currentTitle}</>
     ) : (
       <><Icon name="sparkles" size={15} /> 新对话</>
     );
 
+  const go = (path) => {
+    setSidebarOpen(false);
+    navigate(path);
+  };
+
   return (
     <div className="shell">
       <Sidebar
         open={sidebarOpen}
         onClose={() => setSidebarOpen(false)}
-        view={view}
-        onNavigate={(path) => { setSidebarOpen(false); navigate(path); }}
-        onNewChat={handleNewChat}
-        onOpenData={() => setDrawerOpen(true)}
-        tables={sourceInfo?.tables}
-        targetTable={targetTable}
-        onSelectTable={handleSelectTable}
-        sessions={sessionList}
-        activeSessionId={view === "chat" ? route.sessionId : null}
-        onSelectSession={handleSelectSession}
-        onDeleteSession={handleDeleteSession}
-        sourceInfo={sourceInfo}
+        module={view}
+        onNavigate={go}
+        onSlot={setSlot}
+        chat={{
+          onNewChat: handleNewChat,
+          onOpenData: () => { setSidebarOpen(false); setDrawerOpen(true); },
+          tables: sourceInfo?.tables,
+          targetTable,
+          onSelectTable: handleSelectTable,
+          sessions: sessionList,
+          activeSessionId: view === "chat" ? route.sessionId : null,
+          onSelectSession: handleSelectSession,
+          onDeleteSession: handleDeleteSession,
+        }}
         user={user}
+        online={Boolean(sourceInfo)}
+        account={account}
+        onOpenSettings={(id) => go(`/settings/${id}`)}
+        onBack={() => go(lastAppPath.current)}
         onLogout={handleLogout}
-        onChangePassword={handleChangePassword}
       />
 
       <main className={`main ${view !== "chat" ? "main-wide" : ""}`}>
@@ -369,12 +444,33 @@ function App() {
           <WikiView
             slug={route.slug}
             user={user}
-            onNavigate={(slug) => navigate(slug ? `/wiki/${encodeURIComponent(slug)}` : "/wiki")}
+            navSlot={slot}
+            onNavigate={(slug) => go(slug ? `/wiki/${encodeURIComponent(slug)}` : "/wiki")}
+            onCloseNav={() => setSidebarOpen(false)}
             onAsk={(q) => { setMode("kb"); ask(q, { mode: "kb" }); }}
           />
         )}
-        {view === "memory" && <MemoryView />}
-        {view === "admin" && <AdminView user={user} />}
+        {view === "discover" && (
+          <DiscoverView section={discoverSection.id} navSlot={slot} user={user}
+            onNavigate={(id) => go(id === "all" ? "/discover" : `/discover/${id}`)} onChanged={fetchOptions} />
+        )}
+        {view === "settings" && (
+          <SettingsView
+            section={settingsSection.id}
+            navSlot={slot}
+            onNavigate={(id) => go(`/settings/${id}`)}
+            user={user}
+            account={account}
+            sourceInfo={sourceInfo}
+            models={models}
+            modelId={modelId}
+            onModelChange={setModelId}
+            defaultMode={defaultMode}
+            onDefaultModeChange={setDefaultMode}
+            onPasswordChanged={handlePasswordChanged}
+            onChatsDeleted={() => { setTurns([]); setLoadedSessionId(null); fetchSessions(); }}
+          />
+        )}
       </main>
 
       {user.role !== "viewer" && (
@@ -387,6 +483,7 @@ function App() {
           onAnalyzeTable={handleAnalyzeTable}
         />
       )}
+
     </div>
   );
 }

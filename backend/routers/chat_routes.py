@@ -7,7 +7,7 @@ import time
 from typing import Iterator, Literal
 
 from fastapi import APIRouter, Depends, HTTPException
-from fastapi.responses import StreamingResponse
+from fastapi.responses import Response, StreamingResponse
 from pydantic import BaseModel, Field
 
 from backend import auth
@@ -15,6 +15,8 @@ from backend.assistant import memory as memory_store
 from backend.assistant import sessions
 from backend.assistant.agent import run_turn
 from backend.auth import CurrentUser, get_current_user
+from backend.billing import accounts
+from backend.billing.metering import BillingContext, metered_events
 
 router = APIRouter(prefix="/api", tags=["chat"])
 
@@ -139,16 +141,48 @@ def _run_mode(user: CurrentUser, session: dict, req: SendMessage) -> Iterator[di
 @router.post("/chat/sessions/{session_id}/messages")
 def send_message(session_id: str, req: SendMessage, user: CurrentUser = Depends(get_current_user)):
     session = _require_session(user, session_id)
+    try:
+        accounts.ensure_can_use(user.id, user.role)
+    except accounts.QuotaExceeded as exc:
+        raise HTTPException(status_code=402, detail=str(exc))
     if req.mode == "assistant":
         events = run_turn(_user_dict(user), session_id, req.content, req.table_name, req.model_profile_id, req.skill)
     else:
         events = _run_mode(user, session, req)
     auth.audit("chat_message", user, "chat_session", session_id, {"mode": req.mode, "question": req.content[:200]})
+    # 本轮内所有大模型调用都记到当前用户名下（先扣方案额度，再扣余额）
+    events = metered_events(events, BillingContext(user.id, session_id, req.mode))
     return StreamingResponse(
         _sse(events),
         media_type="text/event-stream",
         headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no"},
     )
+
+
+@router.delete("/chat/sessions")
+def delete_all_sessions(user: CurrentUser = Depends(get_current_user)):
+    """隐私设置：删除自己的全部对话（长期记忆、使用量记录不受影响）。"""
+    count = sessions.delete_all_sessions(user.id)
+    auth.audit("chat_clear", user, "chat_session", None, {"deleted": count})
+    return {"deleted": count}
+
+
+@router.get("/me/export")
+def export_my_data(user: CurrentUser = Depends(get_current_user)):
+    """隐私设置：导出自己的对话、记忆、使用量与账单（JSON）。"""
+    from backend.billing.accounts import list_transactions, usage_report
+
+    data = {
+        "user": _user_dict(user),
+        "sessions": [{**s, "messages": sessions.get_messages(s["id"])} for s in sessions.list_sessions(user.id, limit=1000)],
+        "memories": memory_store.list_memories(user.id),
+        "usage": usage_report(user.id, days=365),
+        "transactions": list_transactions(user.id, limit=500),
+    }
+    auth.audit("data_export", user, "user", str(user.id), {"sessions": len(data["sessions"])})
+    body = json.dumps(data, ensure_ascii=False, default=str, indent=2)
+    return Response(body, media_type="application/json",
+                    headers={"Content-Disposition": f'attachment; filename="datamind-{user.username}.json"'})
 
 
 # ---------------------------------------------------------------------------
@@ -212,12 +246,14 @@ def memory_settings(req: MemorySettings, user: CurrentUser = Depends(get_current
 def model_options(user: CurrentUser = Depends(get_current_user)):
     from backend.llm_profiles import options_for_users
 
-    return options_for_users()
+    return options_for_users(user.id)
 
 
 @router.get("/skills")
 def skill_options(user: CurrentUser = Depends(get_current_user)):
     from backend.assistant.skills import list_skills
+    from backend.market import disabled_keys
 
+    off = disabled_keys(user.id, "skill")
     return {"items": [{"name": s["name"], "title": s["title"], "description": s["description"]}
-                      for s in list_skills(enabled_only=True)]}
+                      for s in list_skills(enabled_only=True) if s["name"] not in off]}

@@ -1,5 +1,6 @@
+/** 用户与权限、审计日志、系统状态（在「设置 → 管理」中显示） */
 import { useCallback, useEffect, useState } from "react";
-import Icon from "./Icon";
+import Icon from "../Icon";
 import {
   createUser,
   getAuditLogs,
@@ -7,13 +8,10 @@ import {
   listUsers,
   reindexKnowledgeBase,
   updateUser,
-} from "../api";
-import { extractErrorMessage } from "../utils/format";
-import ModelsPanel from "./admin/ModelsPanel";
-import SkillsPanel from "./admin/SkillsPanel";
-import ToolsPanel from "./admin/ToolsPanel";
+} from "../../api";
+import { extractErrorMessage } from "../../utils/format";
+import { ROLE_LABEL } from "../../navigation";
 
-const ROLE_LABEL = { admin: "管理员", editor: "编辑", viewer: "只读成员" };
 const ACTION_LABEL = {
   login: "登录",
   login_failed: "登录失败",
@@ -31,11 +29,19 @@ const ACTION_LABEL = {
   kb_reindex: "重建索引",
   csv_import: "导入 CSV",
   table_delete: "删除数据表",
+  store_data_import: "导入门店数据",
+  plan_create: "新建方案",
+  plan_update: "修改方案",
+  plan_assign: "开通方案",
+  balance_adjust: "充值 / 调整余额",
+  data_export: "导出个人数据",
+  chat_clear: "删除全部对话",
+  memory_clear: "清空记忆",
 };
 
 const fmt = (v) => (v ? new Date(v).toLocaleString("zh-CN") : "—");
 
-function UsersPanel({ currentUser }) {
+export function UsersPanel({ currentUser }) {
   const [users, setUsers] = useState([]);
   const [error, setError] = useState(null);
   const [form, setForm] = useState({ username: "", display_name: "", password: "", role: "viewer" });
@@ -138,7 +144,7 @@ function UsersPanel({ currentUser }) {
   );
 }
 
-function AuditPanel() {
+export function AuditPanel() {
   const [data, setData] = useState({ total: 0, items: [] });
   const [filters, setFilters] = useState({ action: "", username: "" });
   const [offset, setOffset] = useState(0);
@@ -195,7 +201,7 @@ function AuditPanel() {
   );
 }
 
-function SystemPanel() {
+export function SystemPanel() {
   const [status, setStatus] = useState(null);
   const [message, setMessage] = useState(null);
   const [version, setVersion] = useState(0);
@@ -249,31 +255,6 @@ function SystemPanel() {
           </div>
         </div>
       </div>
-    </div>
-  );
-}
-
-export default function AdminView({ user }) {
-  const [tab, setTab] = useState("models");
-  return (
-    <div className="admin-view">
-      <header className="admin-head">
-        <h1><Icon name="shield" size={22} /> 系统管理</h1>
-        <div className="segmented">
-          <button type="button" className={tab === "models" ? "active" : ""} onClick={() => setTab("models")}><Icon name="sparkles" size={14} /> 模型</button>
-          <button type="button" className={tab === "tools" ? "active" : ""} onClick={() => setTab("tools")}><Icon name="code" size={14} /> 工具</button>
-          <button type="button" className={tab === "skills" ? "active" : ""} onClick={() => setTab("skills")}><Icon name="bulb" size={14} /> 技能</button>
-          <button type="button" className={tab === "users" ? "active" : ""} onClick={() => setTab("users")}><Icon name="users" size={14} /> 用户与权限</button>
-          <button type="button" className={tab === "audit" ? "active" : ""} onClick={() => setTab("audit")}><Icon name="history" size={14} /> 审计日志</button>
-          <button type="button" className={tab === "system" ? "active" : ""} onClick={() => setTab("system")}><Icon name="activity" size={14} /> 系统状态</button>
-        </div>
-      </header>
-      {tab === "models" && <ModelsPanel />}
-      {tab === "tools" && <ToolsPanel />}
-      {tab === "skills" && <SkillsPanel />}
-      {tab === "users" && <UsersPanel currentUser={user} />}
-      {tab === "audit" && <AuditPanel />}
-      {tab === "system" && <SystemPanel />}
     </div>
   );
 }

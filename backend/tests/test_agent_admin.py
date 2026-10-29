@@ -133,31 +133,31 @@ def test_model_profile_validation(client, admin_headers):
 # 工具
 # ---------------------------------------------------------------------------
 
-GMV_SQL = ("SELECT r.province AS \"省份\", SUM(o.order_amount) AS gmv FROM fact_orders o "
-           "JOIN dim_region r ON r.region_id = o.region_id JOIN dim_date d ON d.date_id = o.order_date "
-           "WHERE d.month_label = :month GROUP BY 1 ORDER BY 2 DESC LIMIT COALESCE(:top, 5)")
+PROFIT_SQL = ("SELECT d.short_name AS \"门店\", SUM(s.gross_profit) AS profit FROM fact_store_sales s "
+              "JOIN dim_store d ON d.store_id = s.store_id "
+              "WHERE s.month_label = :month GROUP BY 1 ORDER BY 2 DESC LIMIT COALESCE(:top, 5)")
 
 
 def _sql_tool(client, headers, **overrides):
-    body = {"name": _uid("gmv"), "display_name": "省份 GMV", "description": "按月份查询各省份 GMV 排名", "kind": "sql",
+    body = {"name": _uid("profit"), "display_name": "门店毛利", "description": "按月份查询各门店毛利排名", "kind": "sql",
             "parameters": {"type": "object", "properties": {"month": {"type": "string"}, "top": {"type": "integer"}},
                            "required": ["month"]},
-            "config": {"sql": GMV_SQL}, **overrides}
+            "config": {"sql": PROFIT_SQL}, **overrides}
     return client.post("/api/admin/tools", headers=headers, json=body)
 
 
 def test_sql_tool_validation_execution_and_injection(client, admin_headers):
-    assert _sql_tool(client, admin_headers, config={"sql": "DELETE FROM fact_orders"}).status_code == 400
-    undeclared = _sql_tool(client, admin_headers, config={"sql": "SELECT * FROM fact_orders WHERE region_id = :region"})
-    assert undeclared.status_code == 400 and "region" in undeclared.json()["detail"]
+    assert _sql_tool(client, admin_headers, config={"sql": "DELETE FROM fact_store_sales"}).status_code == 400
+    undeclared = _sql_tool(client, admin_headers, config={"sql": "SELECT * FROM fact_store_sales WHERE store_id = :store"})
+    assert undeclared.status_code == 400 and "store" in undeclared.json()["detail"]
     assert _sql_tool(client, admin_headers, name="Bad-Name").status_code == 400
     assert _sql_tool(client, admin_headers, config={"sql": "SELECT * FROM users"}).status_code == 201  # 保存允许，执行时只读角色拦截
 
     tool = _sql_tool(client, admin_headers).json()
-    ok = client.post(f"/api/admin/tools/{tool['id']}/test", headers=admin_headers, json={"args": {"month": "2026-06", "top": 2}}).json()
+    ok = client.post(f"/api/admin/tools/{tool['id']}/test", headers=admin_headers, json={"args": {"month": "2026-08", "top": 2}}).json()
     assert ok["ok"] and ok["display"]["row_count"] == 2
     injected = client.post(f"/api/admin/tools/{tool['id']}/test", headers=admin_headers,
-                           json={"args": {"month": "2026-06' OR '1'='1", "top": 2}}).json()
+                           json={"args": {"month": "2026-08' OR '1'='1", "top": 2}}).json()
     assert injected["display"]["row_count"] == 0  # 参数被驱动绑定，注入无效
     missing = client.post(f"/api/admin/tools/{tool['id']}/test", headers=admin_headers, json={"args": {}}).json()
     assert not missing["ok"] and "month" in missing["for_model"]
@@ -225,13 +225,13 @@ def test_agent_uses_custom_tool_and_cannot_call_disabled(client, admin_headers, 
     viewer_headers = make_user("viewer")
     me = client.get("/api/auth/me", headers=viewer_headers).json()
     provider = ScriptedProvider([
-        LLMResponse(tool_calls=[ToolCall("a", tool["name"], {"month": "2026-06", "top": 3})]),
+        LLMResponse(tool_calls=[ToolCall("a", tool["name"], {"month": "2026-08", "top": 3})]),
         LLMResponse(tool_calls=[ToolCall("b", "drop_everything", {})]),
-        LLMResponse(text="广东第一"),
+        LLMResponse(text="望京第一"),
     ])
     set_provider(provider)
     sid = sessions.create_session(me["id"])["id"]
-    events = list(run_turn(me, sid, "6 月 GMV 前三"))
+    events = list(run_turn(me, sid, "8 月毛利前三的门店"))
     results = [e for e in events if e["type"] == "tool_result"]
     assert results[0]["ok"] and results[0]["display"]["row_count"] == 3
     assert not results[1]["ok"] and results[1]["summary"] == "工具不可用"
@@ -281,3 +281,32 @@ def test_skills_crud_and_progressive_loading(client, admin_headers, make_user):
     client.patch(f"/api/admin/skills/{skill['id']}", headers=admin_headers, json={"enabled": False})
     assert name not in [s["name"] for s in client.get("/api/skills", headers=viewer).json()["items"]]
     assert client.delete(f"/api/admin/skills/{skill['id']}", headers=admin_headers).status_code == 200
+
+
+def test_python_analysis_tool_in_agent_and_role_default(client, admin_headers, make_user):
+    from backend.assistant import sessions
+    from backend.assistant.agent import run_turn
+    from backend.assistant.tools import load_registry
+
+    # 执行代码风险更高：默认仅编辑及以上可用
+    assert "python_analysis" not in {s.name for s in load_registry("viewer", True, True).specs}
+    assert "python_analysis" in {s.name for s in load_registry("editor", True, True).specs}
+
+    editor = make_user("editor")
+    me = client.get("/api/auth/me", headers=editor).json()
+    sql = "SELECT product_type AS category, sale_price AS order_amount FROM fact_store_sales WHERE product_type IS NOT NULL"
+    provider = ScriptedProvider([
+        LLMResponse(tool_calls=[ToolCall("p1", "python_analysis", {"sql": sql, "code": "df = pd.read_sql('x')"})]),
+        lambda call: LLMResponse(tool_calls=[ToolCall("p2", "python_analysis", {
+            "sql": sql, "code": "result = df.groupby('category')['order_amount'].sum().sort_values(ascending=False)"})])
+        if "变量名就是 df" in call["messages"][-1]["content"] else LLMResponse(text="没有收到 df 提示"),
+        LLMResponse(text="FD 最高"),
+    ])
+    set_provider(provider)
+    sid = sessions.create_session(me["id"])["id"]
+    events = list(run_turn(me, sid, "各产品线销售额排名"))
+    results = [e for e in events if e["type"] == "tool_result"]
+    assert results[0]["summary"] == "代码未通过安全校验"
+    assert results[1]["ok"] and results[1]["display"]["columns"] == ["category", "order_amount"]
+    assert results[1]["display"]["input_rows"] > 300
+    assert [e for e in events if e["type"] == "done"][0]["content"] == "FD 最高"

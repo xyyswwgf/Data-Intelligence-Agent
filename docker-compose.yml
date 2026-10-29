@@ -19,8 +19,7 @@ services:
     ports:
       - "${DB_PUBLISH_PORT:-15432}:5432"
     volumes:
-      # 经营分析演示数据；正式交付客户时可删除该挂载
-      - ./backend/init_db.sql:/docker-entrypoint-initdb.d/init_db.sql:ro
+      # 表结构由后端启动时的迁移创建；门店数据用 python -m backend.store_data.loader 导入
       - postgres_data:/var/lib/postgresql/data
     healthcheck:
       test: ["CMD-SHELL", "pg_isready -U ${DB_USER:-data_agent} -d ${DB_NAME:-data_agent_db}"]

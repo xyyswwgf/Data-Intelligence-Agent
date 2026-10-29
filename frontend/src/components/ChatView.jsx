@@ -8,16 +8,16 @@ import { AssistantFinal, ReasoningTrace } from "./AssistantAnswer";
 
 const SUGGESTIONS = {
   assistant: [
-    { icon: "trend", title: "6 月销售额最高的 3 个省份是哪些？", desc: "自己找表、写 SQL、核对口径" },
-    { icon: "sparkles", title: "本月 GMV 为什么下降？给出三条建议", desc: "调用归因分析 + 结合知识库" },
-    { icon: "book", title: "净销售额怎么算？上月是多少？", desc: "知识库口径 + 数据库取数" },
-    { icon: "bulb", title: "记住：我负责华北区域，汇报用表格", desc: "写入长期记忆，之后自动参考" },
+    { icon: "trend", title: "8 月各门店毛利和目标达成情况怎么样？", desc: "自己找表、写 SQL、核对口径" },
+    { icon: "sparkles", title: "乐堤港为什么没达成？给出三条建议", desc: "调用门店分析 + 结合门店指导书" },
+    { icon: "book", title: "Magic V Flip 2 的进店价和提成是多少？", desc: "知识库产品政策 + 数据库取数" },
+    { icon: "bulb", title: "记住：我负责望京店，汇报金额用万元", desc: "写入长期记忆，之后自动参考" },
   ],
   agent: [
-    { icon: "trend", title: "本月销售额为什么下降？", desc: "趋势 + 地区 / 品类 / 渠道归因" },
-    { icon: "map", title: "哪些地区拖累了整体利润？", desc: "定位下滑省份与转化漏斗" },
-    { icon: "coins", title: "哪些渠道 ROI 变差？", desc: "净销售额 vs 营销花费" },
-    { icon: "refund", title: "哪些商品退款率异常升高？", desc: "品类退款率排行" },
+    { icon: "trend", title: "本月各门店经营怎么样？", desc: "销售额 / 毛利 / 手机台数 / 目标达成" },
+    { icon: "target", title: "哪些门店和产品线没完成毛利目标？", desc: "定位差距最大的考核项" },
+    { icon: "coins", title: "南锣店员的业绩和提成", desc: "店员毛利、个人目标达成" },
+    { icon: "alert", title: "哪些门店长库龄库存最多？", desc: "库龄超过 90 天的商品" },
   ],
   table: [
     { icon: "trend", title: "这个表按月份有什么变化？", desc: "自动识别时间列与指标" },
@@ -26,20 +26,20 @@ const SUGGESTIONS = {
     { icon: "table", title: "哪些字段缺失比较严重？", desc: "数据质量检查" },
   ],
   kb: [
-    { icon: "book", title: "GMV 和净销售额的口径是什么？", desc: "指标定义" },
-    { icon: "map", title: "华北区域包括哪些省份？", desc: "业务规则" },
-    { icon: "trend", title: "销售下降应该怎么分析？", desc: "分析方法论" },
-    { icon: "coins", title: "渠道 ROI 怎么计算？", desc: "指标公式" },
+    { icon: "book", title: "店长店提的档位和点位是怎么规定的？", desc: "店长店员考核" },
+    { icon: "coins", title: "8 月 X80 Pro Max 的提成是多少？", desc: "产品政策" },
+    { icon: "alert", title: "清尾机怎么计算分值？", desc: "清尾明细" },
+    { icon: "map", title: "移动 79 元畅享套餐的红包和毛利", desc: "运营商政策" },
   ],
   query: [
-    { icon: "code", title: "每个品类的销售额是多少？", desc: "分组聚合" },
-    { icon: "trend", title: "按月统计订单数和 GMV", desc: "时间序列" },
-    { icon: "map", title: "销售额最高的 5 个省份", desc: "排序 + LIMIT" },
-    { icon: "coins", title: "各渠道的营销花费", desc: "多表关联" },
+    { icon: "code", title: "每个门店 8 月的销售额和毛利", desc: "分组聚合" },
+    { icon: "trend", title: "每天卖了多少台手机", desc: "时间序列" },
+    { icon: "map", title: "毛利最高的 5 个店员", desc: "排序 + LIMIT" },
+    { icon: "coins", title: "各门店库龄超过 90 天的库存金额", desc: "多表关联" },
   ],
 };
 
-const MODE_LABEL = { assistant: "智能助手", agent: "经营分析 Agent", table: "CSV 通用分析", kb: "知识问答", query: "SQL 查询" };
+const MODE_LABEL = { assistant: "智能助手", agent: "门店经营分析", table: "CSV 通用分析", kb: "知识问答", query: "SQL 查询" };
 
 function greeting() {
   const hour = new Date().getHours();

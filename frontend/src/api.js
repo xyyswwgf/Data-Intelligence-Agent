@@ -189,6 +189,7 @@ export async function previewCsv(file, options = {}) {
   if (options.dataStartRow) formData.append("data_start_row", String(options.dataStartRow));
   if (options.combineHeaders) formData.append("combine_headers", String(options.combineHeaders));
   if (options.skipTrailing !== undefined) formData.append("skip_trailing", String(options.skipTrailing));
+  if (options.sheetName) formData.append("sheet_name", options.sheetName);
   const response = await apiClient.post("/api/import/csv/preview", formData, {
     headers: { "Content-Type": "multipart/form-data" },
     timeout: 30000,
@@ -236,6 +237,7 @@ export async function importCsv(file, options = {}) {
   if (options.dataStartRow) formData.append("data_start_row", String(options.dataStartRow));
   if (options.combineHeaders) formData.append("combine_headers", String(options.combineHeaders));
   if (options.skipTrailing) formData.append("skip_trailing", String(options.skipTrailing));
+  if (options.sheetName) formData.append("sheet_name", options.sheetName);
   const response = await apiClient.post("/api/import/csv", formData, {
     headers: { "Content-Type": "multipart/form-data" },
     timeout: 120000,
@@ -386,6 +388,19 @@ export async function uploadKnowledgeDocument(file, { parentId, tags } = {}) {
   ).data;
 }
 
+// 门店数据：销售台账、收款明细、ERP、库龄表、指导书。dryRun 只识别不写入
+export async function importStoreData(files, { dryRun = false } = {}) {
+  const formData = new FormData();
+  files.forEach((file) => formData.append("files", file));
+  formData.append("dry_run", dryRun ? "true" : "false");
+  return (
+    await apiClient.post("/api/store-data/import", formData, {
+      headers: { "Content-Type": "multipart/form-data" },
+      timeout: 600000,
+    })
+  ).data;
+}
+
 export function downloadKnowledgeDocument(documentId, filename) {
   return downloadBlob(`/api/kb/documents/${documentId}/download`, filename || "document");
 }
@@ -517,3 +532,75 @@ export const adminApi = {
   updateSkill: async (id, body) => (await apiClient.patch(`/api/admin/skills/${id}`, body)).data,
   deleteSkill: async (id) => (await apiClient.delete(`/api/admin/skills/${id}`)).data,
 };
+
+// ---------------------------------------------------------------------------
+// 使用量、账单、方案
+// ---------------------------------------------------------------------------
+
+export async function getMyAccount() {
+  return (await apiClient.get("/api/billing/me")).data;
+}
+
+export async function getMyUsage(days = 30) {
+  return (await apiClient.get("/api/billing/usage", { params: { days } })).data;
+}
+
+export async function getMyTransactions() {
+  return (await apiClient.get("/api/billing/transactions")).data;
+}
+
+export async function getPublicPlans() {
+  return (await apiClient.get("/api/billing/plans")).data;
+}
+
+export async function listBillingPlans() {
+  return (await apiClient.get("/api/admin/billing/plans")).data;
+}
+
+export async function createBillingPlan(payload) {
+  return (await apiClient.post("/api/admin/billing/plans", payload)).data;
+}
+
+export async function updateBillingPlan(id, payload) {
+  return (await apiClient.patch(`/api/admin/billing/plans/${id}`, payload)).data;
+}
+
+export async function listBillingAccounts() {
+  return (await apiClient.get("/api/admin/billing/accounts")).data;
+}
+
+export async function assignPlan(userId, payload) {
+  return (await apiClient.post(`/api/admin/billing/accounts/${userId}/subscription`, payload)).data;
+}
+
+export async function adjustBalance(userId, payload) {
+  return (await apiClient.post(`/api/admin/billing/accounts/${userId}/balance`, payload)).data;
+}
+
+export async function getAdminUsage(days = 30) {
+  return (await apiClient.get("/api/admin/billing/usage", { params: { days } })).data;
+}
+
+export async function getAdminTransactions() {
+  return (await apiClient.get("/api/admin/billing/transactions")).data;
+}
+
+// ---------------------------------------------------------------------------
+// 发现（模型 / 技能 / 工具目录）与隐私
+// ---------------------------------------------------------------------------
+
+export async function getMarket() {
+  return (await apiClient.get("/api/market")).data;
+}
+
+export async function setMarketItem(kind, key, enabled) {
+  return (await apiClient.put(`/api/market/${kind}/${encodeURIComponent(key)}`, { enabled })).data;
+}
+
+export function exportMyData() {
+  return downloadBlob("/api/me/export", "datamind-export.json");
+}
+
+export async function deleteAllChats() {
+  return (await apiClient.delete("/api/chat/sessions")).data;
+}

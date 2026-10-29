@@ -59,9 +59,12 @@ function Node({ node, depth, activeSlug, expanded, toggle, onOpen }) {
 export default function WikiTree({ items, activeSlug, onOpen }) {
   const tree = useMemo(() => buildTree(items), [items]);
   const [manual, setManual] = useState({});
-  // 当前页面的祖先默认展开，用户手动折叠/展开的状态优先
+  // 顶层页面和当前页面的祖先默认展开，用户手动折叠/展开的状态优先
   const expanded = useMemo(() => {
     const set = ancestorsOf(items, activeSlug);
+    items.forEach((i) => {
+      if (i.parent_id == null) set.add(i.id);
+    });
     items.forEach((i) => {
       if (manual[i.id] === true) set.add(i.id);
       if (manual[i.id] === false) set.delete(i.id);
