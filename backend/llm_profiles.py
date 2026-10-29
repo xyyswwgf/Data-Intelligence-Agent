@@ -21,7 +21,8 @@ from backend.llm_gateway import LLMError, ToolSpec, describe, get_provider
 from backend.secrets_store import decrypt, encrypt, mask
 
 _FIELDS = ("name", "kind", "provider", "base_url", "model", "context_window", "max_output_tokens",
-           "thinking_budget", "reasoning_effort", "no_reasoning_effort", "timeout_seconds", "enabled")
+           "thinking_budget", "reasoning_effort", "no_reasoning_effort", "timeout_seconds", "enabled",
+           "description", "price_input", "price_output")
 
 
 def _public(row) -> dict[str, Any]:
@@ -38,12 +39,18 @@ def list_profiles(enabled_only: bool = False) -> list[dict[str, Any]]:
     return [_public(r) for r in rows]
 
 
-def options_for_users() -> dict[str, Any]:
-    """普通用户可见的模型选项（不含地址和密钥）。没有配置任何模型时返回环境变量模型。"""
+def options_for_users(user_id: int | None = None) -> dict[str, Any]:
+    """
+    用户可选的模型（不含地址和密钥）。没有配置任何模型时返回环境变量模型。
+    用户在「发现」中停用的模型不出现（默认模型始终保留）。
+    """
+    from backend.market import disabled_keys
+
+    off = disabled_keys(user_id, "model") if user_id else set()
     items = [
         {"id": p["id"], "name": p["name"], "kind": p["kind"], "model": p["model"], "is_default": p["is_default"],
          "supports_tools": (p["last_test"] or {}).get("tools")}
-        for p in list_profiles(enabled_only=True)
+        for p in list_profiles(enabled_only=True) if p["is_default"] or str(p["id"]) not in off
     ]
     if not items:
         env = describe(get_provider())
@@ -69,6 +76,7 @@ def create_profile(data: dict) -> dict[str, Any]:
     _validate(data)
     params = {k: data.get(k) for k in _FIELDS}
     params["base_url"] = params["base_url"].rstrip("/")
+    params["description"] = params["description"] or ""
     params["api_key"] = encrypt(data.get("api_key"))
     with get_connection() as conn:
         if conn.execute(text("SELECT 1 FROM llm_profiles WHERE name = :n"), {"n": params["name"]}).first():

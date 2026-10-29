@@ -27,6 +27,7 @@ from backend.assistant import skills as skill_store
 from backend.assistant.tools import ToolContext, args_preview, execute, load_registry, tools_schema
 from backend.config import AGENT_MAX_STEPS
 from backend.llm_gateway import LLMError, describe, get_provider
+from backend.market import disabled_keys
 
 logger = logging.getLogger("nl2sql.assistant")
 
@@ -138,8 +139,9 @@ def run_turn(
 
 
 def _react(provider, user, session, question, target_table, use_memory, trace, skill=None) -> Iterator[dict]:
-    available_skills = skill_store.list_skills(enabled_only=True)
-    registry = load_registry(user["role"], use_memory, bool(available_skills))
+    off_skills = disabled_keys(user["id"], "skill")
+    available_skills = [s for s in skill_store.list_skills(enabled_only=True) if s["name"] not in off_skills]
+    registry = load_registry(user["role"], use_memory, bool(available_skills), disabled_keys(user["id"], "tool"))
     specs = registry.specs
     system = _system_prompt(user, target_table) + skill_store.catalog_prompt(available_skills)
     if skill:

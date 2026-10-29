@@ -21,12 +21,12 @@ DATABASE_URL = os.getenv(
 # 内部表（账号、审计、知识库、分析存档等）不暴露给 LLM 和前端表列表
 SYSTEM_TABLE_PREFIXES = tuple(
     p.strip()
-    for p in os.getenv("SYSTEM_TABLE_PREFIXES", "knowledge_,analysis_,table_profiles,wiki_,kb_,auth_,audit_").split(",")
+    for p in os.getenv("SYSTEM_TABLE_PREFIXES", "knowledge_,analysis_,table_profiles,wiki_,kb_,auth_,audit_,billing_,user_").split(",")
     if p.strip()
 )
 SYSTEM_TABLES = {
     "users", "agent_runs", "schema_migrations", "chat_sessions", "chat_messages", "user_memories",
-    "llm_profiles", "agent_tools", "agent_skills",
+    "llm_profiles", "agent_tools", "agent_skills", "usage_records",
 }
 # LLM / Agent 生成的 SQL 以该数据库角色执行：只对业务表有 SELECT 权限，读不到账号、审计、知识库等系统表
 SQL_READER_ROLE = os.getenv("SQL_READER_ROLE", "nl2sql_reader")
@@ -129,3 +129,10 @@ CORS_ORIGINS = [
     if o.strip()
 ]
 ANALYSIS_HISTORY_LIMIT = int(os.getenv("ANALYSIS_HISTORY_LIMIT", "100"))
+
+# ── 使用量与计费 ──
+# 额度用「点数」计：模型按每 1K 输入 / 输出 token 的点数计价（在「模型接入」中按模型设置）
+# BILLING_ENFORCE=false 时只记录使用量、不拦截（适合纯内部使用）；管理员始终不受额度限制
+BILLING_ENFORCE = os.getenv("BILLING_ENFORCE", "true").lower() in ("1", "true", "yes")
+BILLING_DEFAULT_PRICE_INPUT = float(os.getenv("BILLING_DEFAULT_PRICE_INPUT", "1"))
+BILLING_DEFAULT_PRICE_OUTPUT = float(os.getenv("BILLING_DEFAULT_PRICE_OUTPUT", "2"))

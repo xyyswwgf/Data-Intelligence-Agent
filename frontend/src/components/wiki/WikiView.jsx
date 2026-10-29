@@ -1,4 +1,5 @@
 import { useCallback, useEffect, useMemo, useState } from "react";
+import { createPortal } from "react-dom";
 import Icon from "../Icon";
 import WikiTree from "./WikiTree";
 import WikiHome from "./WikiHome";
@@ -20,10 +21,10 @@ import { extractErrorMessage } from "../../utils/format";
 
 /**
  * 知识库 Wiki 工作区
- *   左栏：搜索 + 目录树 + 新建/上传
+ *   侧边栏（navSlot）：搜索 + 新建 / 上传 / 导入门店数据 + 首页 + 页面目录
  *   主区：索引首页 / 页面阅读 / 编辑 / 新建 / 搜索结果
  */
-export default function WikiView({ slug, user, onNavigate, onAsk }) {
+export default function WikiView({ slug, user, navSlot, onNavigate, onCloseNav, onAsk }) {
   const canEdit = user.role === "editor" || user.role === "admin";
   const canDelete = user.role === "admin";
 
@@ -84,6 +85,7 @@ export default function WikiView({ slug, user, onNavigate, onAsk }) {
     const q = query.trim();
     if (!q) return;
     setDraft(null);
+    onCloseNav();
     try {
       setResults({ q, ...(await searchWiki(q)) });
     } catch (err) {
@@ -92,6 +94,7 @@ export default function WikiView({ slug, user, onNavigate, onAsk }) {
   };
 
   const startCreate = (initial = {}) => {
+    onCloseNav();
     setResults(null);
     setSaveError(null);
     setDraft({ title: "", content_md: "", tags: [], parent_id: null, ...initial });
@@ -236,26 +239,40 @@ export default function WikiView({ slug, user, onNavigate, onAsk }) {
     );
   }
 
+  const nav = (
+    <div className="wiki-sidenav">
+      <form className="wiki-search" onSubmit={runSearch} role="search">
+        <Icon name="search" size={15} />
+        <input value={query} onChange={(e) => setQuery(e.target.value)} placeholder="搜索知识库…" aria-label="搜索知识库" />
+      </form>
+      {canEdit && (
+        <>
+          <button type="button" className="new-chat" onClick={() => startCreate()}>
+            <Icon name="plus" size={16} /> 新建页面
+          </button>
+          <div className="wiki-nav-actions">
+            <button type="button" className="ghost-btn" onClick={() => { onCloseNav(); setUploadOpen(true); }}><Icon name="upload" size={14} /> 上传文档</button>
+            <button type="button" className="ghost-btn" onClick={() => { onCloseNav(); setStoreDataFiles([]); }}><Icon name="database" size={14} /> 导入门店数据</button>
+          </div>
+        </>
+      )}
+      <nav className="side-section">
+        <button type="button" className={`side-item ${!slug && !draft && !results ? "active" : ""}`} onClick={() => open(null)}>
+          <Icon name="home" size={16} /><span className="side-text">知识库首页</span>
+        </button>
+      </nav>
+      <nav className="side-section grow">
+        <div className="side-label">页面目录</div>
+        <div className="side-scroll">
+          <WikiTree items={tree} activeSlug={slug} onOpen={open} />
+        </div>
+      </nav>
+    </div>
+  );
+
   return (
     <div className="wiki-shell">
-      <aside className="wiki-nav">
-        <form className="wiki-search" onSubmit={runSearch}>
-          <Icon name="search" size={15} />
-          <input value={query} onChange={(e) => setQuery(e.target.value)} placeholder="搜索知识库…" />
-        </form>
-        <button type="button" className={`side-item ${!slug && !draft && !results ? "active" : ""}`} onClick={() => open(null)}>
-          <Icon name="book" size={16} /><span className="side-text">知识库索引</span>
-        </button>
-        {canEdit && (
-          <div className="wiki-nav-actions">
-            <button type="button" className="ghost-btn" onClick={() => startCreate()}><Icon name="plus" size={14} /> 新建页面</button>
-            <button type="button" className="ghost-btn" onClick={() => setUploadOpen(true)}><Icon name="upload" size={14} /> 上传文档</button>
-            <button type="button" className="ghost-btn" onClick={() => setStoreDataFiles([])}><Icon name="database" size={14} /> 导入门店数据</button>
-          </div>
-        )}
-        <div className="side-label">页面目录</div>
-        <WikiTree items={tree} activeSlug={slug} onOpen={open} />
-      </aside>
+      {navSlot && createPortal(nav, navSlot)}
       <section className="wiki-main">{main}</section>
 
       {historyOpen && currentPage && (

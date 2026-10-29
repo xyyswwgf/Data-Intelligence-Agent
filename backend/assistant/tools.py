@@ -308,7 +308,8 @@ class Registry:
     custom: dict[str, dict]
 
 
-def load_registry(role: str, memory_enabled: bool, has_skills: bool) -> Registry:
+def load_registry(role: str, memory_enabled: bool, has_skills: bool, disabled: set[str] | None = None) -> Registry:
+    """disabled：用户在「发现」中停用的自定义工具（内置工具不受影响）。"""
     from backend.database import get_connection
     from sqlalchemy import text
 
@@ -323,7 +324,7 @@ def load_registry(role: str, memory_enabled: bool, has_skills: bool) -> Registry
             if name not in BUILTIN_TOOLS or (name == "remember" and not memory_enabled) or (name == "use_skill" and not has_skills):
                 continue
             specs.append(BUILTIN_TOOLS[name].spec)
-        else:
+        elif name not in (disabled or set()):
             specs.append(ToolSpec(name, row["description"], row["parameters"]))
             custom[name] = dict(row)
     return Registry(specs, custom)

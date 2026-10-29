@@ -11,8 +11,8 @@ const CATEGORY = {
 };
 const SOURCE = { auto: "对话中自动提炼", explicit: "你让助手记住", manual: "手动添加" };
 
-/** 「我的记忆」：用户对助手记住的内容完全可见、可控 */
-export default function MemoryView() {
+/** 「我的记忆」：用户对助手记住的内容完全可见、可控。embedded 时嵌在设置弹窗里，标题由弹窗提供 */
+export default function MemoryView({ embedded = false }) {
   const [data, setData] = useState({ enabled: true, items: [] });
   const [error, setError] = useState(null);
   const [draft, setDraft] = useState({ content: "", category: "preference", pinned: false });
@@ -70,10 +70,10 @@ export default function MemoryView() {
   );
 
   return (
-    <div className="admin-view memory-view">
+    <div className={embedded ? "memory-view embedded" : "admin-view memory-view"}>
       <header className="admin-head">
         <div>
-          <h1><Icon name="bulb" size={22} /> 我的记忆</h1>
+          {!embedded && <h1><Icon name="bulb" size={22} /> 我的记忆</h1>}
           <p className="muted">助手会记住你的偏好和背景，在之后的对话里自动参考。这些内容只有你自己可见。</p>
         </div>
         <label className="switch">

@@ -54,6 +54,9 @@ class ProfileIn(BaseModel):
     no_reasoning_effort: str = ""
     timeout_seconds: int = Field(60, ge=5, le=600)
     enabled: bool = True
+    description: str = Field("", max_length=500)
+    price_input: float | None = Field(None, ge=0, le=10000, description="每 1K 输入 token 的点数，留空用系统默认价")
+    price_output: float | None = Field(None, ge=0, le=10000, description="每 1K 输出 token 的点数")
 
 
 class ProfilePatch(BaseModel):
@@ -70,6 +73,9 @@ class ProfilePatch(BaseModel):
     no_reasoning_effort: str | None = None
     timeout_seconds: int | None = Field(None, ge=5, le=600)
     enabled: bool | None = None
+    description: str | None = Field(None, max_length=500)
+    price_input: float | None = Field(None, ge=0, le=10000)
+    price_output: float | None = Field(None, ge=0, le=10000)
 
 
 class DiscoverIn(BaseModel):

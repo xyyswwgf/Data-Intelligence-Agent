@@ -79,6 +79,11 @@ def delete_session(user_id: int, session_id: str) -> None:
         raise LookupError("会话不存在")
 
 
+def delete_all_sessions(user_id: int) -> int:
+    with get_connection() as conn:
+        return conn.execute(text("DELETE FROM chat_sessions WHERE user_id = :u"), {"u": user_id}).rowcount
+
+
 def add_message(session_id: str, role: str, content: str, mode: str = "assistant",
                 payload: dict | None = None, trace: list | dict | None = None) -> dict[str, Any]:
     with get_connection() as conn:

@@ -62,7 +62,7 @@ from backend.agent_service import run_analysis, list_history, get_history_detail
 from backend import auth
 from backend.auth import CurrentUser, get_current_user, require_role
 from backend.migrations import run_migrations
-from backend.routers import agent_admin_routes, auth_routes, chat_routes, kb_routes, store_data_routes
+from backend.routers import agent_admin_routes, auth_routes, billing_routes, chat_routes, kb_routes, store_data_routes
 from backend.generic_table_agent import run_table_analysis
 from backend.config import (
     CORS_ORIGINS,
@@ -127,6 +127,7 @@ app.add_middleware(
 app.include_router(auth_routes.router)
 app.include_router(kb_routes.router)
 app.include_router(store_data_routes.router)
+app.include_router(billing_routes.router)
 app.include_router(chat_routes.router)
 app.include_router(agent_admin_routes.router)
 

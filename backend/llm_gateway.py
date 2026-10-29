@@ -16,6 +16,7 @@ LLM 网关 — 屏蔽不同大模型 API 协议的差异，供 NL2SQL、RAG、�
 
 from __future__ import annotations
 
+import functools
 import json
 import logging
 from dataclasses import dataclass, field
@@ -82,6 +83,21 @@ class ModelSettings:
     timeout_seconds: float = LLM_TIMEOUT_SECONDS
 
 
+def _metered(chat):
+    """包装 Provider 子类的 chat：调用结束后把 token 用量交给计费模块（没有计量上下文时什么都不做）。"""
+
+    @functools.wraps(chat)
+    def wrapper(self, *args, **kwargs):
+        response = chat(self, *args, **kwargs)
+        from backend.billing.metering import record
+
+        record(self, response)
+        return response
+
+    wrapper.__metered__ = True
+    return wrapper
+
+
 class Provider:
     name = "base"
     model = ""
@@ -89,6 +105,12 @@ class Provider:
     profile_name = "环境变量配置"
     kind = "cloud"
     settings = ModelSettings()
+
+    def __init_subclass__(cls, **kwargs):
+        super().__init_subclass__(**kwargs)
+        chat = cls.__dict__.get("chat")
+        if chat is not None and not getattr(chat, "__metered__", False):
+            cls.chat = _metered(chat)
 
     def configured(self) -> bool:
         raise NotImplementedError

@@ -2325,7 +2325,7 @@ details.thinking[open] .thinking-chevron {
 
 /* ── 主导航 & 用户卡片 ── */
 
-.main-nav {
+.module-switch {
   display: grid;
   grid-auto-flow: column;
   grid-auto-columns: 1fr;
@@ -2335,7 +2335,7 @@ details.thinking[open] .thinking-chevron {
   background: var(--surface-3);
 }
 
-.main-nav button {
+.module-switch button {
   display: inline-flex;
   align-items: center;
   justify-content: center;
@@ -2350,7 +2350,7 @@ details.thinking[open] .thinking-chevron {
   white-space: nowrap;
 }
 
-.main-nav button.active {
+.module-switch button.active {
   background: var(--surface);
   color: var(--primary-ink);
   box-shadow: var(--shadow-sm);
@@ -2387,45 +2387,315 @@ details.thinking[open] .thinking-chevron {
 
 .user-menu {
   position: absolute;
-  bottom: calc(100% + 6px);
+  bottom: calc(100% + 8px);
   left: 0;
-  right: 0;
+  width: max(100%, 248px);
   padding: 6px;
   border: 1px solid var(--border);
-  border-radius: 12px;
+  border-radius: 14px;
   background: var(--surface);
   box-shadow: var(--shadow-lg);
-  z-index: 5;
+  z-index: 50;
+  animation: menu-in 0.14s ease-out;
 }
 
-.user-menu-status {
-  display: flex;
-  align-items: center;
-  gap: 8px;
-  padding: 6px 10px 8px;
-  border-bottom: 1px solid var(--border);
-  margin-bottom: 4px;
+@keyframes menu-in {
+  from {
+    opacity: 0;
+    transform: translateY(4px);
+  }
+}
+
+.user-menu-head {
+  padding: 8px 10px 10px;
+}
+
+.user-menu-head strong,
+.user-menu-head small {
+  display: block;
+  overflow: hidden;
+  white-space: nowrap;
+  text-overflow: ellipsis;
+}
+
+.user-menu-head strong {
+  font-size: 13.5px;
+}
+
+.user-menu-head small {
   color: var(--text-3);
   font-size: 12px;
+}
+
+.user-menu-sep {
+  height: 1px;
+  margin: 4px 6px;
+  background: var(--border);
 }
 
 .user-menu button {
   display: flex;
   align-items: center;
-  gap: 8px;
+  gap: 10px;
   width: 100%;
   padding: 8px 10px;
   border: none;
-  border-radius: 8px;
+  border-radius: 9px;
   background: transparent;
   color: var(--text-2);
   text-align: left;
 }
 
-.user-menu button:hover {
+.user-menu button > span {
+  flex: 1;
+}
+
+.user-menu button.user-menu-quota > span {
+  flex: none;
+}
+
+.user-menu button:hover,
+.user-menu button:focus-visible {
   background: var(--surface-3);
   color: var(--text);
+  outline: none;
 }
+
+kbd {
+  padding: 1px 6px;
+  border: 1px solid var(--border);
+  border-bottom-width: 2px;
+  border-radius: 6px;
+  background: var(--surface-2);
+  color: var(--text-3);
+  font-family: var(--font);
+  font-size: 11.5px;
+}
+
+.status-card {
+  transition: background 0.15s ease, border-color 0.15s ease;
+}
+
+.status-card:hover,
+.status-card.open {
+  border-color: var(--border-strong);
+  background: var(--surface-2);
+}
+
+.status-card-text {
+  flex: 1;
+  min-width: 0;
+}
+
+.status-card-text strong {
+  overflow: hidden;
+  white-space: nowrap;
+  text-overflow: ellipsis;
+}
+
+.status-card-chevron {
+  color: var(--text-3);
+  transform: rotate(-90deg);
+  transition: transform 0.15s ease;
+}
+
+.status-card.open .status-card-chevron {
+  transform: rotate(90deg);
+}
+
+/* ── 模块导航（侧边栏中部） ── */
+
+.module-nav,
+.module-slot,
+.wiki-sidenav,
+.module-nav-list {
+  display: flex;
+  flex-direction: column;
+  gap: 18px;
+  flex: 1;
+  min-height: 0;
+}
+
+.wiki-sidenav {
+  gap: 12px;
+}
+
+.wiki-sidenav .side-section.grow {
+  margin-top: 4px;
+}
+
+.module-back {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+
+.module-back .side-item {
+  color: var(--text-3);
+  font-size: 13px;
+}
+
+.module-title {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 2px 10px;
+  font-size: 15px;
+  font-weight: 700;
+}
+
+.module-title .icon {
+  color: var(--primary);
+}
+
+.crumb-sep {
+  color: var(--text-3);
+  font-weight: 400;
+}
+
+/* ── 设置 ── */
+
+.settings-row {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 24px;
+  padding: 16px 0;
+  border-bottom: 1px solid var(--border);
+}
+
+.settings-row-text strong,
+.settings-row-text small {
+  display: block;
+}
+
+.settings-row-text small {
+  margin-top: 2px;
+  color: var(--text-3);
+  font-size: 12.5px;
+}
+
+.settings-row-control {
+  flex-shrink: 0;
+}
+
+.settings-row select {
+  width: 240px;
+}
+
+.settings-row select,
+.settings-form input {
+  min-width: 220px;
+  padding: 8px 10px;
+  border: 1px solid var(--border);
+  border-radius: 10px;
+  background: var(--surface);
+  outline: none;
+}
+
+.settings-row select:focus,
+.settings-form input:focus {
+  border-color: var(--primary-2);
+}
+
+.settings-note {
+  margin: 8px 0 0;
+  color: var(--text-3);
+  font-size: 12.5px;
+}
+
+.settings-profile {
+  display: flex;
+  align-items: center;
+  gap: 14px;
+  padding: 16px 0 8px;
+}
+
+.settings-profile strong,
+.settings-profile small {
+  display: block;
+}
+
+.settings-profile small {
+  color: var(--text-3);
+}
+
+.avatar.avatar-lg {
+  width: 48px;
+  height: 48px;
+  border-radius: 14px;
+  font-size: 20px;
+}
+
+.settings-form {
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+  max-width: 380px;
+  margin-top: 20px;
+  padding-top: 20px;
+  border-top: 1px solid var(--border);
+}
+
+.settings-form h4,
+.settings-block h4 {
+  margin: 0;
+  font-size: 14px;
+}
+
+.settings-form label {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  color: var(--text-2);
+  font-size: 13px;
+  font-weight: 600;
+}
+
+.settings-block {
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+  padding: 18px 0 4px;
+}
+
+.shortcut-list {
+  margin: 0;
+}
+
+.shortcut-list div {
+  display: flex;
+  justify-content: space-between;
+  padding: 7px 0;
+  border-bottom: 1px dashed var(--surface-3);
+}
+
+.shortcut-list dt {
+  color: var(--text-2);
+}
+
+.shortcut-list dd {
+  margin: 0;
+}
+
+.settings-tips {
+  margin: 0;
+  padding-left: 18px;
+  color: var(--text-2);
+  font-size: 13px;
+}
+
+.memory-view.embedded {
+  display: flex;
+  flex-direction: column;
+  gap: 16px;
+  padding-top: 12px;
+}
+
+.memory-view.embedded .panel-grid {
+  grid-template-columns: 1fr;
+}
+
 
 /* ── Markdown 正文 ── */
 
@@ -2660,22 +2930,9 @@ details.thinking[open] .thinking-chevron {
 
 .wiki-shell {
   display: grid;
-  grid-template-columns: 240px 1fr;
+  grid-template-columns: minmax(0, 1fr);
   flex: 1;
   min-height: 0;
-}
-
-.wiki-nav {
-  position: sticky;
-  top: 65px;
-  display: flex;
-  flex-direction: column;
-  gap: 8px;
-  height: calc(100vh - 65px);
-  padding: 16px 12px;
-  border-right: 1px solid var(--border);
-  background: rgba(255, 255, 255, 0.5);
-  overflow-y: auto;
 }
 
 .wiki-search {
@@ -2712,10 +2969,6 @@ details.thinking[open] .thinking-chevron {
   padding: 6px 8px;
   border-radius: 10px;
   font-size: 12.5px;
-}
-
-.wiki-nav .side-label {
-  margin-top: 8px;
 }
 
 .wiki-tree,
@@ -3581,19 +3834,7 @@ button.tag-chip:hover,
 
 @media (max-width: 900px) {
   .wiki-shell {
-    grid-template-columns: 1fr;
-  }
-
-  .wiki-shell {
     min-height: auto;
-  }
-
-  .wiki-nav {
-    position: static;
-    height: auto;
-    overflow: visible;
-    border-right: none;
-    border-bottom: 1px solid var(--border);
   }
 
   .wiki-main,
@@ -3922,7 +4163,7 @@ button.tag-chip:hover,
 
 /* 我的记忆 */
 
-.memory-view .admin-head p {
+.admin-head p {
   margin: 4px 0 0;
 }
 
@@ -4627,4 +4868,497 @@ button.tag-chip:hover,
   white-space: pre-wrap;
   max-height: 260px;
   overflow: auto;
+}
+
+/* =========================================================================
+   v4：整页设置、使用量与方案、发现（模型 / 技能 / 工具目录）
+   ========================================================================= */
+
+.settings-view,
+.discover-view {
+  max-width: 1080px;
+}
+
+.settings-card {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  padding: 16px 20px;
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  background: var(--surface);
+  box-shadow: var(--shadow-sm);
+}
+
+.settings-card h4 {
+  margin: 0;
+  font-size: 14px;
+}
+
+.settings-card .settings-row:last-of-type {
+  border-bottom: none;
+}
+
+.settings-card-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+}
+
+.settings-card .settings-form,
+.settings-card.settings-form {
+  margin-top: 0;
+  padding-top: 16px;
+  border-top: none;
+}
+
+.settings-card.settings-form {
+  max-width: none;
+}
+
+.settings-card.settings-form label {
+  max-width: 380px;
+}
+
+.settings-sidenav .wiki-search {
+  margin-bottom: -6px;
+}
+
+.segmented.small button {
+  padding: 3px 9px;
+  font-size: 12.5px;
+}
+
+.btn-danger {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  border: 1px solid #f5c2c4;
+  border-radius: 10px;
+  background: var(--danger-soft);
+  color: #a3272b;
+  font-weight: 600;
+}
+
+.btn-danger:hover:not(:disabled) {
+  background: #fbdcdd;
+}
+
+.negative {
+  color: var(--danger);
+}
+
+.cell-sub {
+  display: block;
+  color: var(--text-3);
+  font-size: 11.5px;
+  font-weight: 400;
+}
+
+/* ── 额度 ── */
+
+.plan-badge {
+  display: inline-block;
+  padding: 1px 9px;
+  border-radius: 999px;
+  background: var(--primary-soft);
+  color: var(--primary-ink);
+  font-size: 12px;
+  font-weight: 600;
+  white-space: nowrap;
+}
+
+.plan-badge.muted {
+  background: var(--surface-3);
+  color: var(--text-3);
+}
+
+.quota-head {
+  display: flex;
+  align-items: flex-end;
+  justify-content: space-between;
+  gap: 12px;
+}
+
+.quota-head small {
+  display: block;
+  margin-top: 4px;
+  color: var(--text-3);
+  font-size: 12.5px;
+}
+
+.quota-head > strong {
+  font-size: 24px;
+  letter-spacing: -0.02em;
+  font-variant-numeric: tabular-nums;
+  white-space: nowrap;
+}
+
+.quota-head > strong small {
+  display: inline;
+  color: var(--text-3);
+  font-size: 13px;
+  font-weight: 500;
+}
+
+.quota-bar {
+  display: block;
+  height: 8px;
+  overflow: hidden;
+  border-radius: 999px;
+  background: var(--surface-3);
+}
+
+.quota-bar > span {
+  display: block;
+  height: 100%;
+  border-radius: inherit;
+  background: var(--gradient);
+  transition: width 0.3s ease;
+}
+
+.quota-bar.warn > span {
+  background: linear-gradient(90deg, #f59f00, var(--danger));
+}
+
+.quota-foot {
+  display: flex;
+  justify-content: space-between;
+  color: var(--text-2);
+  font-size: 12.5px;
+}
+
+.user-menu button.user-menu-quota {
+  flex-direction: column;
+  align-items: stretch;
+  gap: 6px;
+  margin-bottom: 4px;
+  padding: 10px;
+  background: var(--surface-2);
+}
+
+.user-menu-quota-row {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+}
+
+.user-menu-quota-row small {
+  color: var(--text-3);
+  font-size: 12px;
+}
+
+/* ── 方案卡片 ── */
+
+.plan-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(220px, 1fr));
+  gap: 12px;
+}
+
+.plan-card {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  padding: 18px;
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  background: var(--surface);
+  box-shadow: var(--shadow-sm);
+  text-align: left;
+}
+
+.plan-card.current {
+  border-color: var(--primary-2);
+  box-shadow: 0 0 0 3px var(--primary-soft);
+}
+
+.plan-card.disabled {
+  opacity: 0.6;
+}
+
+.plan-card.add {
+  align-items: center;
+  justify-content: center;
+  min-height: 180px;
+  border-style: dashed;
+  background: transparent;
+  color: var(--text-3);
+  font-weight: 600;
+  box-shadow: none;
+}
+
+.plan-card.add:hover {
+  border-color: var(--primary-2);
+  color: var(--primary-ink);
+}
+
+.plan-card-head {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+
+.plan-card-head strong {
+  font-size: 16px;
+}
+
+.plan-price {
+  font-size: 24px;
+  font-weight: 700;
+  letter-spacing: -0.02em;
+}
+
+.plan-price small {
+  color: var(--text-3);
+  font-size: 13px;
+  font-weight: 500;
+}
+
+.plan-card p {
+  margin: 0;
+  color: var(--text-2);
+  font-size: 13px;
+}
+
+.plan-card ul {
+  flex: 1;
+  margin: 0;
+  padding: 0;
+  list-style: none;
+  color: var(--text-2);
+  font-size: 13px;
+}
+
+.plan-card li {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  padding: 2px 0;
+}
+
+.plan-card li .icon {
+  color: var(--success);
+}
+
+.account-action {
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+  padding: 12px;
+  border-radius: var(--radius-sm);
+  background: var(--surface-2);
+}
+
+.mini-table tr.action-row td {
+  padding: 4px 0 12px;
+}
+
+.mini-table tr.muted td {
+  opacity: 0.55;
+}
+
+/* ── 发现 ── */
+
+.discover-toolbar {
+  display: flex;
+  align-items: center;
+  gap: 14px;
+}
+
+.discover-toolbar .wiki-search.grow {
+  flex: 1;
+  max-width: 420px;
+}
+
+.check-inline {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  color: var(--text-2);
+  font-size: 13px;
+  white-space: nowrap;
+}
+
+.market-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(280px, 1fr));
+  gap: 12px;
+}
+
+.market-card {
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+  padding: 16px;
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  background: var(--surface);
+  box-shadow: var(--shadow-sm);
+  transition: border-color 0.15s ease, opacity 0.15s ease;
+}
+
+.market-card:hover {
+  border-color: var(--border-strong);
+}
+
+.market-card.off {
+  opacity: 0.62;
+}
+
+.market-card header {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+}
+
+.market-icon {
+  display: grid;
+  place-items: center;
+  width: 36px;
+  height: 36px;
+  border-radius: 10px;
+  flex-shrink: 0;
+}
+
+.market-icon.model {
+  background: var(--primary-soft);
+  color: var(--primary);
+}
+
+.market-icon.skill {
+  background: var(--warning-soft);
+  color: var(--warning);
+}
+
+.market-icon.tool {
+  background: #e3fafc;
+  color: #0c8599;
+}
+
+.market-title {
+  flex: 1;
+  min-width: 0;
+}
+
+.market-title strong,
+.market-title small {
+  display: block;
+  overflow: hidden;
+  white-space: nowrap;
+  text-overflow: ellipsis;
+}
+
+.market-title small {
+  color: var(--text-3);
+  font-size: 12px;
+}
+
+.market-card p {
+  flex: 1;
+  margin: 0;
+  color: var(--text-2);
+  font-size: 13px;
+  display: -webkit-box;
+  -webkit-line-clamp: 3;
+  -webkit-box-orient: vertical;
+  overflow: hidden;
+}
+
+.market-card footer {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 6px;
+}
+
+.market-price {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  color: var(--text-3);
+  font-size: 12px;
+}
+
+.switch.locked {
+  opacity: 0.55;
+  cursor: not-allowed;
+}
+
+.market-banner {
+  display: flex;
+  align-items: center;
+  gap: 14px;
+  margin-top: 8px;
+  padding: 16px 18px;
+  border: 1px dashed var(--border-strong);
+  border-radius: var(--radius);
+  color: var(--text-2);
+}
+
+.market-banner > .icon {
+  color: var(--primary);
+  flex-shrink: 0;
+}
+
+.market-banner strong,
+.market-banner span {
+  display: block;
+}
+
+.market-banner span {
+  font-size: 13px;
+}
+
+.side-item.static {
+  cursor: default;
+}
+
+.side-item.static:hover {
+  background: transparent;
+  color: inherit;
+}
+
+a.side-item {
+  text-decoration: none;
+}
+
+.module-switch button {
+  gap: 4px;
+  padding: 7px 2px;
+  font-size: 12.5px;
+}
+
+@media (max-width: 700px) {
+  .discover-toolbar {
+    flex-direction: column;
+    align-items: stretch;
+  }
+
+  .discover-toolbar .wiki-search.grow {
+    max-width: none;
+  }
+
+  .settings-row {
+    flex-direction: column;
+    align-items: stretch;
+    gap: 10px;
+  }
+
+  .settings-row select,
+  .settings-form input {
+    width: 100%;
+    min-width: 0;
+  }
+
+  .user-menu kbd {
+    display: none;
+  }
+
+  .quota-head {
+    flex-direction: column;
+    align-items: flex-start;
+  }
 }

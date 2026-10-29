@@ -7,6 +7,7 @@
 
 from __future__ import annotations
 
+import json
 import logging
 from typing import Callable
 
@@ -470,6 +471,106 @@ def _m010_mask_remarks(conn: Connection) -> None:
             conn.execute(text(f"UPDATE {table} SET remark = :remark WHERE {key} = :id"), changed)
 
 
+# 初始方案（管理员可在「设置 → 方案与计费」中修改）；价格单位为分，额度单位为点数
+_SEED_PLANS = [
+    ("free", "免费版", "体验智能分析与知识库", 0, 2000, True, 0,
+     ["每月 2,000 点数", "智能分析、知识库问答", "门店经营分析"]),
+    ("pro", "专业版", "个人日常分析", 4900, 30000, False, 10,
+     ["每月 30,000 点数", "全部模型与技能", "额度用完可用余额继续"]),
+    ("team", "团队版", "门店和部门共用", 19900, 150000, False, 20,
+     ["每月 150,000 点数", "全部模型、技能与工具", "优先使用本地大模型"]),
+]
+
+
+def _m011_billing_and_market(conn: Connection) -> None:
+    """使用量计量、方案（套餐）+ 余额计费、账单流水，以及用户在「发现」中启用 / 停用模型、技能、工具。"""
+    conn.execute(text("""
+        CREATE TABLE IF NOT EXISTS billing_plans (
+            id BIGSERIAL PRIMARY KEY,
+            code VARCHAR(32) NOT NULL UNIQUE,
+            name VARCHAR(50) NOT NULL,
+            description TEXT NOT NULL DEFAULT '',
+            price_cents INT NOT NULL DEFAULT 0 CHECK (price_cents >= 0),
+            monthly_credits NUMERIC(14, 2) NOT NULL DEFAULT 0 CHECK (monthly_credits >= 0),
+            features JSONB NOT NULL DEFAULT '[]'::jsonb,
+            is_default BOOLEAN NOT NULL DEFAULT FALSE,
+            enabled BOOLEAN NOT NULL DEFAULT TRUE,
+            sort_order INT NOT NULL DEFAULT 0,
+            created_at TIMESTAMPTZ NOT NULL DEFAULT now(),
+            updated_at TIMESTAMPTZ NOT NULL DEFAULT now()
+        );
+        CREATE UNIQUE INDEX IF NOT EXISTS uq_billing_plans_default ON billing_plans (is_default) WHERE is_default;
+
+        CREATE TABLE IF NOT EXISTS user_subscriptions (
+            user_id BIGINT PRIMARY KEY REFERENCES users(id) ON DELETE CASCADE,
+            plan_id BIGINT NOT NULL REFERENCES billing_plans(id),
+            period_start TIMESTAMPTZ NOT NULL,
+            period_end TIMESTAMPTZ NOT NULL,
+            expires_at TIMESTAMPTZ,
+            used_credits NUMERIC(14, 4) NOT NULL DEFAULT 0,
+            updated_at TIMESTAMPTZ NOT NULL DEFAULT now()
+        );
+
+        CREATE TABLE IF NOT EXISTS user_wallets (
+            user_id BIGINT PRIMARY KEY REFERENCES users(id) ON DELETE CASCADE,
+            balance NUMERIC(14, 4) NOT NULL DEFAULT 0,
+            updated_at TIMESTAMPTZ NOT NULL DEFAULT now()
+        );
+
+        CREATE TABLE IF NOT EXISTS usage_records (
+            id BIGSERIAL PRIMARY KEY,
+            user_id BIGINT NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+            session_id VARCHAR(64),
+            mode VARCHAR(16),
+            profile_id BIGINT REFERENCES llm_profiles(id) ON DELETE SET NULL,
+            model VARCHAR(200),
+            input_tokens INT NOT NULL DEFAULT 0,
+            output_tokens INT NOT NULL DEFAULT 0,
+            credits NUMERIC(14, 4) NOT NULL DEFAULT 0,
+            plan_credits NUMERIC(14, 4) NOT NULL DEFAULT 0,
+            balance_credits NUMERIC(14, 4) NOT NULL DEFAULT 0,
+            created_at TIMESTAMPTZ NOT NULL DEFAULT now()
+        );
+        CREATE INDEX IF NOT EXISTS idx_usage_user_time ON usage_records (user_id, created_at DESC);
+        CREATE INDEX IF NOT EXISTS idx_usage_time ON usage_records (created_at DESC);
+
+        CREATE TABLE IF NOT EXISTS billing_transactions (
+            id BIGSERIAL PRIMARY KEY,
+            user_id BIGINT NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+            kind VARCHAR(16) NOT NULL CHECK (kind IN ('subscribe', 'recharge', 'adjust', 'refund')),
+            plan_id BIGINT REFERENCES billing_plans(id) ON DELETE SET NULL,
+            credits NUMERIC(14, 4) NOT NULL DEFAULT 0,
+            amount_cents INT NOT NULL DEFAULT 0,
+            channel VARCHAR(16) NOT NULL DEFAULT 'manual' CHECK (channel IN ('manual', 'wechat', 'alipay')),
+            status VARCHAR(16) NOT NULL DEFAULT 'paid' CHECK (status IN ('pending', 'paid', 'failed', 'refunded')),
+            external_no VARCHAR(64),
+            note TEXT,
+            operator_id BIGINT REFERENCES users(id) ON DELETE SET NULL,
+            created_at TIMESTAMPTZ NOT NULL DEFAULT now()
+        );
+        CREATE INDEX IF NOT EXISTS idx_billing_tx_user ON billing_transactions (user_id, created_at DESC);
+
+        CREATE TABLE IF NOT EXISTS user_market_prefs (
+            user_id BIGINT NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+            kind VARCHAR(16) NOT NULL CHECK (kind IN ('model', 'skill', 'tool')),
+            item_key VARCHAR(100) NOT NULL,
+            enabled BOOLEAN NOT NULL,
+            updated_at TIMESTAMPTZ NOT NULL DEFAULT now(),
+            PRIMARY KEY (user_id, kind, item_key)
+        );
+
+        ALTER TABLE llm_profiles ADD COLUMN IF NOT EXISTS description TEXT NOT NULL DEFAULT '';
+        ALTER TABLE llm_profiles ADD COLUMN IF NOT EXISTS price_input NUMERIC(10, 4);
+        ALTER TABLE llm_profiles ADD COLUMN IF NOT EXISTS price_output NUMERIC(10, 4);
+    """))
+    for code, name, desc, price, credits, default, order, features in _SEED_PLANS:
+        conn.execute(text("""
+            INSERT INTO billing_plans (code, name, description, price_cents, monthly_credits, features, is_default, sort_order)
+            VALUES (:c, :n, :d, :p, :cr, CAST(:f AS jsonb), :def, :o) ON CONFLICT (code) DO NOTHING
+        """), {"c": code, "n": name, "d": desc, "p": price, "cr": credits, "f": json.dumps(features, ensure_ascii=False),
+               "def": default, "o": order})
+
+
 MIGRATIONS: list[tuple[int, str, Callable[[Connection], None]]] = [
     (1, "core schema: users, audit, wiki, kb, agent_runs", _m001_core_schema),
     (2, "read-only SQL role for LLM/agent queries", _m002_reader_role),
@@ -481,6 +582,7 @@ MIGRATIONS: list[tuple[int, str, Callable[[Connection], None]]] = [
     (8, "phone count by product name", _m008_store_comments),
     (9, "exclude transfers and wholesale from store sales", _m009_drop_non_retail),
     (10, "mask phone and id numbers in remarks", _m010_mask_remarks),
+    (11, "usage metering, plans, wallet, billing and market prefs", _m011_billing_and_market),
 ]
 
 
