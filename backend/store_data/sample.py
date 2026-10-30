@@ -5,7 +5,7 @@
 
 数据是确定性的（固定随机种子），测试可以对结果做精确断言：
   - 2026-07、2026-08 两个月，四家门店，每店两名店员
-  - 8 月有门店 / 店员毛利目标和产品线目标；南锣达成最高、乐堤港最低
+  - 8 月有门店 / 店员毛利目标和产品线目标；老城达成最高、滨河最低
   - 库龄表中每店都有超过 90 天的商品
 """
 
@@ -19,13 +19,13 @@ from sqlalchemy import text
 from sqlalchemy.engine import Connection
 
 from backend.store_data.parsers import PHONE_TYPES, is_phone
-from backend.store_data.schema import BUSINESS_TABLES, STORES
+from backend.store_data.schema import BUSINESS_TABLES, DEFAULT_STORES
 
 STAFF = {
-    "wangjing": ["王一", "王二"],
-    "nanluo": ["南一", "南二"],
-    "letigang": ["乐一", "乐二"],
-    "yangguang": ["阳一", "阳二"],
+    "store_east": ["东一", "东二"],
+    "store_old": ["老一", "老二"],
+    "store_river": ["河一", "河二"],
+    "store_new": ["新一", "新二"],
 }
 # (类型, 系列, 商品, 售价, 进店价)
 PRODUCTS = [
@@ -38,10 +38,10 @@ PRODUCTS = [
     ("贴膜", "贴膜", "荣耀Magic V5 盾系列钢化膜", 69, 45),
     ("回收", "回收", "回收荣耀Magic6", 1800, 1500),
 ]
-SHORT = {code: short for code, _name, short, _mall, _aliases in STORES}
+SHORT = {code: short for code, _name, short, _mall, _aliases in DEFAULT_STORES}
 PAYMENTS = ["银联国补pos", "线下微信", "线下支付宝", "荣耀+微信"]
-# 8 月毛利目标：南锣最容易达成，乐堤港最难
-TARGETS = {"wangjing": 30000, "nanluo": 20000, "letigang": 60000, "yangguang": 35000}
+# 8 月毛利目标：老城最容易达成，滨河最难
+TARGETS = {"store_east": 30000, "store_old": 20000, "store_river": 60000, "store_new": 35000}
 
 
 def build() -> dict[str, list[dict[str, Any]]]:
@@ -119,7 +119,7 @@ def build() -> dict[str, list[dict[str, Any]]]:
                           "age_days": 30 + 40 * j, "model": name.split("-")[0]})
 
     payments = [{"channel": "微信" if k % 2 else "支付宝", "paid_at": dt.datetime(2026, 8, 1 + k, 12), "store_code": store,
-                 "merchant_label": f"荣耀授权体验店（{store}）", "trade_no": f"T{k:06d}", "merchant_order_no": f"M{k:06d}",
+                 "merchant_label": f"连锁门店（{SHORT[store]}）", "trade_no": f"T{k:06d}", "merchant_order_no": f"M{k:06d}",
                  "trade_type": "JSAPI", "status": "SUCCESS", "amount": 100 + k, "expense": None, "refund_amount": 0,
                  "fee": 0.2, "fee_rate": "0.20%", "balance": None, "remark": None, "source_file": "sample"}
                 for k, store in enumerate(stores * 3)]
@@ -136,13 +136,22 @@ def build() -> dict[str, list[dict[str, Any]]]:
 def load_sample(conn: Connection) -> dict[str, int]:
     from backend.store_data.loader import write
 
+    # 样例数据总是使用虚构门店：清空业务表后，门店维度也换成示例门店
+    conn.execute(text(f"TRUNCATE {', '.join(BUSINESS_TABLES)} RESTART IDENTITY"))
+    conn.execute(text("DELETE FROM dim_store WHERE store_code <> ALL(:codes)"), {"codes": [s[0] for s in DEFAULT_STORES]})
+    for code, name, short, mall, aliases in DEFAULT_STORES:
+        conn.execute(text("""
+            INSERT INTO dim_store (store_code, store_name, short_name, mall, aliases)
+            VALUES (:code, :name, :short, :mall, :aliases)
+            ON CONFLICT (store_code) DO UPDATE SET store_name = EXCLUDED.store_name, short_name = EXCLUDED.short_name,
+                mall = EXCLUDED.mall, aliases = EXCLUDED.aliases
+        """), {"code": code, "name": name, "short": short, "mall": mall, "aliases": aliases})
     ids = dict(conn.execute(text("SELECT store_code, store_id FROM dim_store")).all())
     data = build()
     for rows in data.values():
         for row in rows:
             if "store_code" in row:
                 row["store_id"] = ids[row.pop("store_code")]
-    conn.execute(text(f"TRUNCATE {', '.join(BUSINESS_TABLES)} RESTART IDENTITY"))
     return write(conn, data)
 
 

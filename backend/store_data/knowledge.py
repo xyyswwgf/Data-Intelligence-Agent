@@ -20,6 +20,7 @@ from sqlalchemy import text
 from backend.database import get_connection
 from backend.excel_importer import read_workbook
 from backend.store_data.parsers import _month_from, _number, _text, parse_product_policy
+from backend.store_data.schema import brand
 
 HOME_SLUG = "home"
 DATA_GUIDE_SLUG = "store-data-guide"
@@ -208,7 +209,7 @@ def _data_guide() -> str:
     lines = ["# 门店与数据说明", "", "## 门店", "",
              "| 门店 | 全称 | 商场 | 仓库 | 店员 |", "|---|---|---|---|---|"]
     for s in stores:
-        lines.append(f"| {s['short_name']} | 荣耀授权体验店（{s['store_name']}） | {s['mall'] or '—'} | "
+        lines.append(f"| {s['short_name']} | {brand()}（{s['store_name']}） | {s['mall'] or '—'} | "
                      f"{s['warehouse'] or '—'} | {s['staff'] or '—'} |")
     lines += ["", "## 指标口径", "",
               "- **销售额** = 销售台账 `fact_store_sales.sale_price` 求和（含回收业务；回收的销售价格是回收平台给公司的价格）。"
@@ -289,8 +290,10 @@ def rebuild_knowledge(files: list[Path], wait: bool = True) -> dict[str, Any]:
     """
     from backend.kb.indexer import index_page, submit_index
 
+    with get_connection() as conn:
+        store_list = "、".join(conn.execute(text("SELECT store_name FROM dim_store ORDER BY store_id")).scalars().all())
     home = (
-        "# 知识库首页\n\n荣耀授权体验店（望京万象汇、南锣鼓巷、通州乐堤港、阳光新生活广场）经营知识库。\n\n"
+        f"# 知识库首页\n\n{brand()}（{store_list}）经营知识库。\n\n"
         f"- [[{DATA_GUIDE_SLUG}]] 门店与数据说明：门店、店员、指标口径、数据覆盖\n"
     )
     home_id = _upsert(HOME_SLUG, "知识库首页", home, ["导航"], None)

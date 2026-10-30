@@ -3,7 +3,7 @@
 
   planner → knowledge → sql → executor → analysis → attribution → visualization → report
 
-分析对象是荣耀授权体验店的销售台账（fact_store_sales）、月度任务（fact_store_targets）和库龄表（fact_stock_age）：
+分析对象是门店的销售台账（fact_store_sales）、月度任务（fact_store_targets）和库龄表（fact_stock_age）：
   - 门店：销售额、毛利、毛利率、手机台数，对照毛利目标计算达成率；月中按已过天数预估月底达成
   - 结构：产品线（类型）、店员、收款方式，定位贡献最大和差距最大的部分
   - 库存：长库龄（> 90 天）商品的数量和金额

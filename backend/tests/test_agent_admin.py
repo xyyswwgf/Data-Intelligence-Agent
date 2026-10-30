@@ -227,7 +227,7 @@ def test_agent_uses_custom_tool_and_cannot_call_disabled(client, admin_headers, 
     provider = ScriptedProvider([
         LLMResponse(tool_calls=[ToolCall("a", tool["name"], {"month": "2026-08", "top": 3})]),
         LLMResponse(tool_calls=[ToolCall("b", "drop_everything", {})]),
-        LLMResponse(text="望京第一"),
+        LLMResponse(text="城东第一"),
     ])
     set_provider(provider)
     sid = sessions.create_session(me["id"])["id"]

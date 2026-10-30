@@ -9,6 +9,9 @@
   rows      参考 SQL 返回一列数（SQL 查询模式），查询结果里要包含每一个
   citation  回答引用了指定前缀的知识库页面
   contains  回答中包含任意一个关键词
+
+用例可以带 params：{"名称": "返回一个值的 SQL"}，评测时先执行得到值，代入问题里的 {名称}，
+并作为参考 SQL 的绑定参数 :名称 —— 例如「{store}店的毛利」中的门店从门店表里选，评测集不用写死门店名。
 """
 
 from __future__ import annotations
@@ -94,9 +97,14 @@ def close(actual: float, expected: float) -> bool:
     return abs(actual - expected) <= max(abs(expected) * _REL_TOL, 0.01)
 
 
-def _reference(sql: str) -> list[Any]:
+def _reference(sql: str, params: dict | None = None) -> list[Any]:
     with get_connection() as conn:
-        return [row[0] for row in conn.execute(text(sql)).all()]
+        return [row[0] for row in conn.execute(text(sql), params or {}).all()]
+
+
+def _params(case: dict) -> dict[str, Any]:
+    with get_connection() as conn:
+        return {name: conn.execute(text(sql)).scalar() for name, sql in (case.get("params") or {}).items()}
 
 
 def _cells(result: dict | None) -> list[float]:
@@ -110,7 +118,8 @@ def _cells(result: dict | None) -> list[float]:
     return values
 
 
-def check(spec: dict, answer: str, citations: list[dict], result: dict | None) -> dict[str, Any]:
+def check(spec: dict, answer: str, citations: list[dict], result: dict | None,
+          params: dict | None = None) -> dict[str, Any]:
     kind = spec["type"]
     if kind == "contains":
         ok = any(word in answer for word in spec["any"])
@@ -120,7 +129,7 @@ def check(spec: dict, answer: str, citations: list[dict], result: dict | None) -
         ok = any(slug.startswith(spec["slug_prefix"]) for slug in cited)
         return {"type": kind, "passed": ok, "expected": f"引用 {spec['slug_prefix']}…", "actual": cited[:5]}
 
-    expected = [v for v in _reference(spec["sql"]) if v is not None]
+    expected = [v for v in _reference(spec["sql"], params) if v is not None]
     if not expected:
         return {"type": kind, "passed": None, "expected": "参考 SQL 没有数据（跳过）"}
     if kind == "text":
@@ -186,9 +195,12 @@ def _ask(case: dict, user: dict, profile_id: int | None) -> dict[str, Any]:
 
 def run_case(case: dict, user: dict, profile_id: int | None) -> dict[str, Any]:
     started = time.perf_counter()
+    question = case["question"]
     try:
-        got = _ask(case, user, profile_id)
-        checks = [check(spec, got["answer"], got["citations"], got["result"]) for spec in case["checks"]]
+        params = _params(case)
+        question = case["question"].format(**params) if params else case["question"]
+        got = _ask({**case, "question": question}, user, profile_id)
+        checks = [check(spec, got["answer"], got["citations"], got["result"], params) for spec in case["checks"]]
         decided = [c["passed"] for c in checks if c["passed"] is not None]
         passed = all(decided) if decided else None
         error = None
@@ -196,7 +208,7 @@ def run_case(case: dict, user: dict, profile_id: int | None) -> dict[str, Any]:
         logger.exception("评测用例 %s 失败", case["id"])
         got, checks, passed, error = {"answer": "", "tokens": 0}, [], False, str(exc)
     return {
-        "id": case["id"], "mode": case.get("mode", "assistant"), "question": case["question"],
+        "id": case["id"], "mode": case.get("mode", "assistant"), "question": question,
         "passed": passed, "checks": checks, "answer": (got["answer"] or "")[:1200], "error": error,
         "elapsed_ms": int((time.perf_counter() - started) * 1000), "tokens": got.get("tokens", 0),
     }

@@ -86,10 +86,10 @@ def test_business_agent_end_to_end():
     assert body["report"]["summary"] and len(body["charts"]) == 3
     metrics = {m["name"]: m for m in body["metrics"]}
     assert metrics["毛利"]["change_rate"] is not None and metrics["毛利"]["comparison"] == "环比"
-    # 样例数据中南锣达成最高、乐堤港最低
+    # 样例数据中老城达成最高、滨河最低
     stores = body["attribution"]["stores"]
-    assert stores[0]["门店"] == "乐堤港" and stores[-1]["门店"] == "南锣"
-    assert "最低的是乐堤港" in body["report"]["summary"]
+    assert stores[0]["门店"] == "滨河" and stores[-1]["门店"] == "老城"
+    assert "最低的是滨河" in body["report"]["summary"]
     assert {t["title"] for t in body["attribution"]["tables"]} >= {"门店达成", "店员业绩"}
     history = C.get("/api/analysis/history").json()["items"]
     assert history[0]["run_id"] == body["run_id"]
@@ -98,10 +98,10 @@ def test_business_agent_end_to_end():
 
 
 def test_business_agent_respects_month_and_store_in_question():
-    body = C.post("/api/analyze", json={"question": "2026年7月望京的经营情况"}).json()
+    body = C.post("/api/analyze", json={"question": "2026年7月城东的经营情况"}).json()
     assert body["status"] == "completed", body["errors"]
     assert body["period"]["current"] == "2026-07" and body["period"]["previous"] == "2026-07"
-    assert [s["门店"] for s in body["attribution"]["stores"]] == ["望京"]
+    assert [s["门店"] for s in body["attribution"]["stores"]] == ["城东"]
     assert all(m["change_rate"] is None for m in body["metrics"])  # 没有上一个月，不做环比
 
 

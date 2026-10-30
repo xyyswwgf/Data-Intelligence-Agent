@@ -266,7 +266,7 @@ BUILTIN_TOOLS: dict[str, Tool] = {
         # 门店零售行业包的专属分析（只有启用该行业包时才提供）
         Tool(ToolSpec("business_analysis", "门店经营分析：各门店销售额、毛利、手机台数、毛利目标达成，产品线 / 店员 / 收款方式结构，"
                       "长库龄库存。回答「门店经营怎么样」「为什么没达成」「哪个门店 / 产品线 / 店员拖累」这类问题时使用；"
-                      "question 中可带门店名（望京 / 南锣 / 乐堤港 / 阳光）和月份。",
+                      "question 中可带门店名（简称或商场名）和月份。",
                       {"type": "object", "properties": {"question": {"type": "string"}}, "required": ["question"]}),
              _business_analysis),
         Tool(ToolSpec("analyze_imported_table", "对用户导入的 CSV 表（csv_ 前缀）做趋势、分组、缺失、异常分析。",

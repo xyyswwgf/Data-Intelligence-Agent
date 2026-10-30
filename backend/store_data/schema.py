@@ -4,16 +4,56 @@
 
 from __future__ import annotations
 
+import json
+import logging
+import os
+
 from sqlalchemy import text
 from sqlalchemy.engine import Connection
 
 # 门店维度：code、全称、简称、别名（源文件里出现过的各种叫法，用于识别门店）
-STORES = [
-    ("wangjing", "望京万象汇店", "望京", "望京万象汇", ["望京", "万象汇", "望京万象汇库"]),
-    ("nanluo", "南锣鼓巷店", "南锣", "南锣鼓巷", ["南锣", "南锣鼓巷店仓"]),
-    ("letigang", "通州乐堤港店", "乐堤港", "远洋乐堤港", ["乐堤港", "乐提港", "通州乐堤港库"]),
-    ("yangguang", "阳光新生活广场店", "阳光", "阳光新生活广场", ["阳光", "新生活", "通州新生活库"]),
+# 虚构的示例门店（代码仓库、自动化测试、演示数据使用）。真实门店写在不进仓库的本地配置文件里：
+#   STORE_CONFIG_FILE（默认 ~/.datamind/stores.json），格式：
+#   {"brand": "品牌名", "stores": [{"code": "...", "name": "...", "short": "...", "mall": "...", "aliases": [...]}]}
+DEFAULT_BRAND = "连锁门店"
+DEFAULT_STORES = [
+    ("store_east", "城东万达店", "城东", "城东万达广场", ["城东", "万达", "城东仓"]),
+    ("store_old", "老城步行街店", "老城", "老城步行街", ["老城", "步行街", "老城仓"]),
+    ("store_river", "滨河天街店", "滨河", "滨河天街", ["滨河", "天街", "滨河仓"]),
+    ("store_new", "新区中心店", "新区", "新区中心广场", ["新区", "中心广场", "新区仓"]),
 ]
+
+
+def _config() -> dict:
+    path = os.path.expanduser(os.getenv("STORE_CONFIG_FILE", "~/.datamind/stores.json"))
+    if not path or not os.path.isfile(path):
+        return {}
+    try:
+        with open(path, encoding="utf-8") as fh:
+            return json.load(fh)
+    except (OSError, json.JSONDecodeError) as exc:
+        logging.getLogger("nl2sql.store_data").warning("门店配置 %s 无法读取，使用示例门店: %s", path, exc)
+        return {}
+
+
+def load_stores() -> list[tuple[str, str, str, str, list[str]]]:
+    """门店清单：有本地配置时用真实门店，否则用虚构的示例门店。"""
+    stores = _config().get("stores")
+    if not stores:
+        return DEFAULT_STORES
+    return [(s["code"], s["name"], s["short"], s.get("mall") or "", list(s.get("aliases") or [])) for s in stores]
+
+
+def brand() -> str:
+    return _config().get("brand") or DEFAULT_BRAND
+
+
+def store_names() -> list[str]:
+    """所有门店的名称、简称、商场名和别名（解析台账时判断「门店」还是「店员」用）。"""
+    names = []
+    for _code, name, short, mall, aliases in load_stores():
+        names += [n for n in (name, short, mall, *aliases) if n]
+    return names
 
 # 业务表（重置数据时按此顺序清空）
 BUSINESS_TABLES = [
@@ -35,8 +75,8 @@ CREATE TABLE IF NOT EXISTS dim_store (
     mall VARCHAR(50),
     aliases TEXT[] NOT NULL DEFAULT '{}'
 );
-COMMENT ON TABLE dim_store IS '门店维度：荣耀授权体验店。按门店统计时 JOIN dim_store 取 short_name（望京 / 南锣 / 乐堤港 / 阳光）';
-COMMENT ON COLUMN dim_store.short_name IS '门店简称：望京、南锣、乐堤港、阳光';
+COMMENT ON TABLE dim_store IS '门店维度。按门店统计时 JOIN dim_store 取 short_name';
+COMMENT ON COLUMN dim_store.short_name IS '门店简称（问题里说的门店名通常是简称或商场名）';
 COMMENT ON COLUMN dim_store.mall IS '所在商场';
 COMMENT ON COLUMN dim_store.aliases IS '源文件中出现过的门店叫法和仓库名';
 
@@ -241,7 +281,7 @@ def create_schema(conn: Connection) -> None:
     for table in LEGACY_DEMO_TABLES:
         conn.execute(text(f"DROP TABLE IF EXISTS {table} CASCADE"))
     conn.execute(text(DDL))
-    for code, name, short, mall, aliases in STORES:
+    for code, name, short, mall, aliases in load_stores():
         conn.execute(
             text("""
                 INSERT INTO dim_store (store_code, store_name, short_name, mall, aliases)

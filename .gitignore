@@ -46,3 +46,13 @@ data/
 
 # 本地私人文件（简历等），不提交
 *.local.md
+
+# 真实门店报表、导出文件：只导入本地数据库，不提交（scripts/check_sensitive.py 也会拦截）
+*.xlsx
+*.xlsm
+*.XLS
+*.XLSX
+*.csv
+!sample_data/*.csv
+stores.json
+denylist.txt

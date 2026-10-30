@@ -17,6 +17,7 @@ from pathlib import Path
 from typing import Any
 
 from backend.excel_importer import read_workbook
+from backend.store_data.schema import store_names
 
 # 台账「类型」中属于手机的产品线（样例数据和产品线归类用；是否手机以商品名称为准，见 is_phone）
 PHONE_TYPES = {"FD", "数字", "X系列", "畅玩系列", "畅玩", "Power", "ND"}
@@ -474,7 +475,7 @@ def parse_targets(rows: list[list[Any]], label: str) -> list[dict[str, Any]]:
             owner = _text(_get(row, 0))
             target_row = row
         elif kind == "截至到目前完成" and target_row is not None and owner:
-            owner_type = "store" if any(s in owner for s in ("望京", "南锣", "乐堤港", "乐提港", "阳光")) else "staff"
+            owner_type = "store" if any(s in owner for s in store_names()) else "staff"
             for i, (item, unit) in items.items():
                 target = _number(_get(target_row, i))
                 achieved = _number(_get(row, i))
