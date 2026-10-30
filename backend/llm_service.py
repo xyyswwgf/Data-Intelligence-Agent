@@ -68,8 +68,7 @@ _SYSTEM_PROMPT_TEMPLATE = """你是一个资深的 PostgreSQL SQL 查询专家�
 7. {coverage}
 8. 明细查询（非聚合）默认加 LIMIT 200，除非用户明确要求全部数据。
 9. 结果列使用中文别名（AS "销售额"），方便业务人员阅读。
-10. 门店口径：销售额 = SUM(sale_price)，毛利 = SUM(gross_profit)，手机台数 = COUNT(*) FILTER (WHERE is_phone)；
-    按门店统计时 JOIN "dim_store" 取 short_name（望京 / 南锣 / 乐堤港 / 阳光）。
+10. {domain_rules}
 
 ---
 
@@ -105,42 +104,43 @@ _SYSTEM_PROMPT_TEMPLATE = """你是一个资深的 PostgreSQL SQL 查询专家�
 ### 6. 聚合函数 — COUNT / SUM / AVG / MAX / MIN
 - 「总共有多少学生？」→ SELECT COUNT(*) AS "总人数" FROM "students"
 - 「有成绩记录的学生数（去重）」→ SELECT COUNT(DISTINCT "学号") FROM "scores"
-- 「总销售额」→ SELECT SUM("sale_price") AS "总销售额" FROM "fact_store_sales"
+- 「总销售额」→ SELECT SUM("金额") AS "总销售额" FROM "orders"
 - 「平均分」→ SELECT AVG("成绩") AS "平均分" FROM "scores"
 
 ### 7. 分组聚合 — GROUP BY
-- 「每个门店的销售额」→ SELECT d."short_name" AS "门店", SUM(s."sale_price") AS "销售额" FROM "fact_store_sales" s JOIN "dim_store" d ON s."store_id" = d."store_id" GROUP BY d."short_name"
-- 「每天卖了多少台手机」→ SELECT "sale_date", COUNT(*) FILTER (WHERE "is_phone") AS "手机台数" FROM "fact_store_sales" GROUP BY "sale_date"
+- 「每个门店的销售额」→ SELECT d."门店名称", SUM(o."金额") AS "销售额" FROM "orders" o JOIN "stores" d ON o."门店编号" = d."门店编号" GROUP BY d."门店名称"
+- 「每天有多少笔订单」→ SELECT "下单日期", COUNT(*) AS "订单数" FROM "orders" GROUP BY "下单日期"
 
 ### 8. 聚合后筛选 — HAVING
 - 「毛利大于1000的产品线」→ GROUP BY "product_type" HAVING SUM("gross_profit") > 1000
 
 ### 9. 表关联 — JOIN / LEFT JOIN / 多表JOIN
-- 「销售记录对应的门店」→ FROM "fact_store_sales" s JOIN "dim_store" d ON s."store_id" = d."store_id"
-- 「所有门店及其库存（含没有库存的门店）」→ FROM "dim_store" d LEFT JOIN "fact_stock_age" a ON ...
+- 「订单对应的门店」→ FROM "orders" o JOIN "stores" d ON o."门店编号" = d."门店编号"
+- 「所有门店及其订单（含没有订单的门店）」→ FROM "stores" d LEFT JOIN "orders" o ON ...
 
 ### 10. 子查询 — WHERE ... IN (SELECT ...) / 派生表
-- 「售价高于平均值的商品」→ WHERE "sale_price" > (SELECT AVG("sale_price") FROM "fact_store_sales")
+- 「金额高于平均值的订单」→ WHERE "金额" > (SELECT AVG("金额") FROM "orders")
 - 「每个院系最高分的学生」→ 使用派生表子查询
 
 ### 11. CASE WHEN — 条件分类
 - 「销售额>=10000为高，>=5000为中，否则低」
-  → SELECT CASE WHEN SUM("sale_price")>=10000 THEN '高' WHEN SUM("sale_price")>=5000 THEN '中' ELSE '低' END AS "等级" FROM "fact_store_sales"
+  → SELECT CASE WHEN SUM("金额")>=10000 THEN '高' WHEN SUM("金额")>=5000 THEN '中' ELSE '低' END AS "等级" FROM "orders"
 
 ### 12. 日期函数 — TO_CHAR / EXTRACT / DATE_TRUNC
-- 「按月统计销售额」→ SELECT "month_label" AS "月份", SUM("sale_price") FROM "fact_store_sales" GROUP BY "month_label"
+- 「按月统计销售额」→ SELECT TO_CHAR("下单日期", 'YYYY-MM') AS "月份", SUM("金额") FROM "orders" GROUP BY 1
 - 「2026年的销售」→ WHERE EXTRACT(YEAR FROM "sale_date") = 2026
 - 「8月的销售」→ WHERE "month_label" = '2026-08'
 
 ### 13. 字符串函数 — CONCAT / SUBSTRING
-- 「取日期年月」→ SELECT TO_CHAR("sale_date", 'YYYY-MM') FROM "fact_store_sales"
+- 「取日期年月」→ SELECT TO_CHAR("下单日期", 'YYYY-MM') FROM "orders"
 
 ### 14. 数值函数 — ROUND / FLOOR / CEIL
-- 「平均售价保留2位小数」→ SELECT ROUND(AVG("sale_price"), 2) AS "平均售价" FROM "fact_store_sales"
+- 「平均金额保留2位小数」→ SELECT ROUND(AVG("金额"), 2) AS "平均金额" FROM "orders"
 
 ### 15. 序号/排名 — ROW_NUMBER / RANK（PostgreSQL 窗口函数）
-- 「店员毛利排名」→ SELECT "salesperson", SUM("gross_profit") AS "毛利", RANK() OVER (ORDER BY SUM("gross_profit") DESC) AS "排名" FROM "fact_store_sales" GROUP BY "salesperson"
+- 「销售员业绩排名」→ SELECT "销售员", SUM("金额") AS "业绩", RANK() OVER (ORDER BY SUM("金额") DESC) AS "排名" FROM "orders" GROUP BY "销售员"
 
+{domain_examples}
 ### 16. UNION 合并
 - 「两个表里都出现过的客户」→ SELECT "customer_id" FROM "表A" UNION SELECT "customer_id" FROM "表B"
 
@@ -207,17 +207,10 @@ def _extract_sql_from_response(raw_text: str) -> str:
 
 
 def _coverage_hint() -> str:
-    """数据的实际时间范围（业务数据不一定更新到今天）。"""
-    try:
-        from backend.database import execute_sql
+    """数据的实际时间范围（业务数据不一定更新到今天），由当前行业包提供。"""
+    from backend.packs import coverage_hint
 
-        row = execute_sql("SELECT MIN(sale_date)::text, MAX(sale_date)::text, MAX(month_label) FROM fact_store_sales")["data"][0]
-    except Exception:
-        row = None
-    if not row or not row[0]:
-        return "数据的时间范围以表中实际数据为准。"
-    return (f"门店销售数据覆盖 {row[0]} 到 {row[1]}。用户说「本月」时默认指 {row[2]}（数据中最新的月份），"
-            "「上月」指它的前一个月。")
+    return coverage_hint()
 
 
 def generate_sql(question: str, failed_sql: str | None = None, error: str | None = None,
@@ -229,7 +222,7 @@ def generate_sql(question: str, failed_sql: str | None = None, error: str | None
 
     参数:
         question:   用户的自然语言问题
-                    示例: "每个门店本月的毛利是多少？"
+                    示例: "每个月的销售额是多少？"
         failed_sql: （可选）上一次执行失败的 SQL，用于自我修正
         error:      （可选）上一次执行的数据库报错
 
@@ -250,7 +243,11 @@ def generate_sql(question: str, failed_sql: str | None = None, error: str | None
         )
 
     # 1. 动态获取最新的数据库 DDL（元数据外挂）
-    system_prompt = _SYSTEM_PROMPT_TEMPLATE.format(ddl=get_ddl(), coverage=_coverage_hint())
+    from backend.packs import active_pack
+
+    pack = active_pack()
+    system_prompt = _SYSTEM_PROMPT_TEMPLATE.format(ddl=get_ddl(), coverage=_coverage_hint(), domain_rules=pack.sql_rules,
+                                                   domain_examples=pack.sql_examples)
 
     # 2. 组装用户消息（首次生成 / 基于报错修正）
     if failed_sql and error:
@@ -277,7 +274,7 @@ def generate_sql(question: str, failed_sql: str | None = None, error: str | None
     if sql.upper().strip().rstrip(".。") == "UNANSWERABLE":
         raise ValueError(
             "您的问题无法转换为 SQL 查询，请尝试更具体的数据分析问题。"
-            "例如：'每个门店本月的销售额和毛利' 或 '各产品线的毛利排名'。"
+            "例如：'每个月的销售额合计' 或 '各类别的数量排名'。"
         )
 
     return sql

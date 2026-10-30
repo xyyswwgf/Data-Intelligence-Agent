@@ -120,11 +120,19 @@ def _run_mode(user: CurrentUser, session: dict, req: SendMessage) -> Iterator[di
     provider = get_provider(req.model_profile_id or session.get("model_profile_id"))
     try:
         if req.mode == "agent":
-            result = (run_table_analysis(req.content, req.table_name, user_id=user.id) if req.table_name
-                      else run_analysis(req.content, user_id=user.id))
+            from backend.packs import active_pack
+
+            if req.table_name:
+                result = run_table_analysis(req.content, req.table_name, user_id=user.id)
+            elif active_pack().analysis_tool:
+                result = run_analysis(req.content, user_id=user.id)
+            else:
+                raise ValueError("当前行业包没有专属分析流程，请先在左侧「数据空间」选择要分析的数据表")
             text = (result.get("report") or {}).get("summary", "")
         elif req.mode == "kb":
-            result = rag.ask(req.content, provider=provider)
+            from backend.kb.spaces import readable_spaces
+
+            result = rag.ask(req.content, provider=provider, spaces=readable_spaces(user.id))
             text = result["answer"]
         else:
             result = answer_query(req.content, provider=provider)

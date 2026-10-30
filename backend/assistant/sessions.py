@@ -35,12 +35,16 @@ def create_session(user_id: int, title: str | None = None) -> dict[str, Any]:
     return dict(row)
 
 
+EVAL_TITLE_PREFIX = "[评测] "  # 准确率评测临时创建的会话，跑完即删，不出现在对话列表里
+
+
 def list_sessions(user_id: int, limit: int = 50) -> list[dict[str, Any]]:
     with get_connection() as conn:
         rows = conn.execute(text("""
             SELECT id::text AS id, title, message_count, created_at, updated_at, summary <> '' AS compacted
-            FROM chat_sessions WHERE user_id = :u ORDER BY updated_at DESC LIMIT :l
-        """), {"u": user_id, "l": limit}).mappings().all()
+            FROM chat_sessions WHERE user_id = :u AND NOT starts_with(title, :p)
+            ORDER BY updated_at DESC LIMIT :l
+        """), {"u": user_id, "l": limit, "p": EVAL_TITLE_PREFIX}).mappings().all()
     return [dict(r) for r in rows]
 
 

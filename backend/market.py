@@ -60,12 +60,17 @@ def _skills(off: set[str]) -> list[dict[str, Any]]:
 
 
 def _tools(off: set[str], role: str) -> list[dict[str, Any]]:
+    from backend.packs import PACK_TOOLS, active_pack
+
+    pack_tool = active_pack().analysis_tool
     with get_connection() as conn:
         rows = conn.execute(text("SELECT name, display_name, description, kind, min_role FROM agent_tools "
                                  "WHERE enabled ORDER BY kind, id")).mappings().all()
     items = []
     for t in rows:
         if _ROLE_RANK.get(role, 0) < _ROLE_RANK.get(t["min_role"], 0):
+            continue
+        if t["name"] in PACK_TOOLS and t["name"] != pack_tool:
             continue
         builtin = t["kind"] == "builtin"
         items.append({

@@ -2516,6 +2516,17 @@ kbd {
   min-height: 0;
 }
 
+/* 中间导航区在侧栏里单独滚动：内容再多也不会压到底部的用户卡片上 */
+.module-nav {
+  margin: 0 -6px;
+  padding: 0 6px 4px;
+  overflow-x: hidden;
+  overflow-y: auto;
+  overscroll-behavior: contain;
+  scrollbar-width: thin;
+  scrollbar-color: var(--border-strong) transparent;
+}
+
 .wiki-sidenav {
   gap: 12px;
 }
@@ -5361,4 +5372,115 @@ a.side-item {
     flex-direction: column;
     align-items: flex-start;
   }
+}
+
+/* ── 流式回答 ── */
+
+.summary.is-streaming .markdown-body > :last-child::after {
+  content: "";
+  display: inline-block;
+  width: 7px;
+  height: 1em;
+  margin-left: 3px;
+  vertical-align: text-bottom;
+  border-radius: 2px;
+  background: var(--primary);
+  animation: caret-blink 1s steps(2, start) infinite;
+}
+
+@keyframes caret-blink {
+  to {
+    visibility: hidden;
+  }
+}
+
+.trace-thought.streaming p {
+  color: var(--text-3);
+  white-space: pre-wrap;
+}
+
+.pack-chip {
+  border-color: var(--primary-2) !important;
+  color: var(--primary-ink) !important;
+}
+
+/* ── 知识空间 ── */
+
+.space-switch {
+  display: grid;
+  grid-auto-flow: column;
+  grid-auto-columns: 1fr;
+}
+
+.space-switch button {
+  justify-content: center;
+}
+
+.space-count {
+  padding: 0 6px;
+  border-radius: 999px;
+  background: var(--surface-3);
+  color: var(--text-3);
+  font-size: 11px;
+}
+
+.space-switch button.active .space-count {
+  background: var(--primary-soft);
+  color: var(--primary-ink);
+}
+
+.space-pill {
+  display: inline-flex;
+  align-items: center;
+  gap: 3px;
+  margin-right: 8px;
+  padding: 1px 8px;
+  border-radius: 999px;
+  background: var(--primary-soft);
+  color: var(--primary-ink);
+  font-size: 12px;
+  font-weight: 600;
+}
+
+.space-pill.personal {
+  background: #e3fafc;
+  color: #0c8599;
+}
+
+/* ── 准确率评测 ── */
+
+.eval-score {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  min-width: 180px;
+}
+
+.eval-score .quota-bar {
+  flex: 1;
+  height: 6px;
+}
+
+.eval-score small {
+  color: var(--text-3);
+}
+
+.eval-table td {
+  vertical-align: top;
+}
+
+.eval-answer {
+  max-width: 360px;
+  color: var(--text-3) !important;
+  font-size: 12px;
+  white-space: pre-wrap;
+  word-break: break-all;
+}
+
+.icon.ok {
+  color: var(--success);
+}
+
+.icon.bad {
+  color: var(--danger);
 }

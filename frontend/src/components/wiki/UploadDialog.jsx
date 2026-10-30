@@ -10,7 +10,7 @@ const ACCEPT = `.md,.markdown,.txt,.pdf,.docx,${STORE_DATA_ACCEPT}`;
  * 批量上传文档：逐个上传，每个文件独立显示结果（成功 / 重复 / 失败原因）。
  * Excel（销售台账、收款明细等）转到门店数据导入，数字写入数据表而不是切成文本片段。
  */
-export default function UploadDialog({ pages, defaultParentId, onClose, onDone, onOpen, onStoreData }) {
+export default function UploadDialog({ pages, defaultParentId, spaceId, spaceName, onClose, onDone, onOpen, onStoreData }) {
   const [files, setFiles] = useState([]);
   const [parentId, setParentId] = useState(defaultParentId ?? "");
   const [tags, setTags] = useState("");
@@ -21,13 +21,16 @@ export default function UploadDialog({ pages, defaultParentId, onClose, onDone, 
   const addFiles = (list) => {
     const all = Array.from(list);
     const excel = all.filter(isStoreDataFile);
-    if (excel.length && !files.length && excel.length === all.length) {
+    if (onStoreData && excel.length && !files.length && excel.length === all.length) {
       onStoreData(excel);
       return;
     }
-    const incoming = all.map((file) => (isStoreDataFile(file)
-      ? { file, status: "excel", message: "" }
-      : { file, status: "pending", message: "" }));
+    // 没有门店数据导入入口（个人空间、或当前行业包不需要）时，Excel 应在「数据空间」中作为数据表导入
+    const incoming = all.map((file) => (!isStoreDataFile(file)
+      ? { file, status: "pending", message: "" }
+      : onStoreData
+        ? { file, status: "excel", message: "" }
+        : { file, status: "error", message: "Excel 请在左侧「数据空间 → 导入」中作为数据表导入" }));
     setFiles((prev) => [...prev, ...incoming]);
   };
 
@@ -37,7 +40,7 @@ export default function UploadDialog({ pages, defaultParentId, onClose, onDone, 
       if (files[i].status !== "pending") continue;
       setFiles((prev) => prev.map((f, j) => (j === i ? { ...f, status: "uploading" } : f)));
       try {
-        const res = await uploadKnowledgeDocument(files[i].file, { parentId: parentId || null, tags });
+        const res = await uploadKnowledgeDocument(files[i].file, { parentId: parentId || null, tags, spaceId });
         setFiles((prev) => prev.map((f, j) => (j === i ? { ...f, status: "done", slug: res.page.slug, message: res.page.title } : f)));
       } catch (err) {
         const detail = err.response?.data?.detail;
@@ -61,7 +64,7 @@ export default function UploadDialog({ pages, defaultParentId, onClose, onDone, 
     <div className="conflict-overlay" onClick={() => !running && onClose()}>
       <div className="preview-dialog upload-dialog" onClick={(e) => e.stopPropagation()}>
         <div className="drawer-head plain">
-          <h3><Icon name="upload" size={18} /> 上传文档到知识库</h3>
+          <h3><Icon name="upload" size={18} /> 上传文档到「{spaceName || "知识库"}」</h3>
           <button type="button" className="icon-btn" onClick={onClose} disabled={running} aria-label="关闭"><Icon name="x" size={18} /></button>
         </div>
         <div
@@ -107,7 +110,7 @@ export default function UploadDialog({ pages, defaultParentId, onClose, onDone, 
             ))}
           </ul>
         )}
-        {excelFiles.length > 0 && !running && (
+        {onStoreData && excelFiles.length > 0 && !running && (
           <div className="callout info">
             <Icon name="database" size={16} />
             <span>

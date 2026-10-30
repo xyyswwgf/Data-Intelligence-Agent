@@ -21,9 +21,11 @@ function Picker({ icon, label, title, open, onToggle, children }) {
 }
 
 export default function Composer({
-  onSubmit, loading, mode, onModeChange, targetTable, onClearTable, onOpenData, autoFocus,
+  onSubmit, loading, mode, onModeChange, pack, targetTable, onClearTable, onOpenData, autoFocus,
   models = [], modelId, onModelChange, skills = [], skill, onSkillChange,
 }) {
+  // 第二个模式：选中导入表时是「表格分析」，否则是行业包的专属分析（通用包没有专属分析时隐藏）
+  const analysisLabel = targetTable ? "表格分析" : pack?.analysis_label;
   const [value, setValue] = useState("");
   const [menu, setMenu] = useState(null);
   const currentModel = models.find((m) => m.id === modelId) || models.find((m) => m.is_default) || models[0];
@@ -51,15 +53,16 @@ export default function Composer({
     }
   };
 
+  const hint = pack?.placeholders || {};
   const placeholder = mode === "assistant"
     ? targetTable ? `问问关于 ${targetTable} 的任何问题` : "问任何业务问题，我会自己查资料、查数据、推理后回答"
     : mode === "kb"
-    ? "向企业知识库提问，例如：8 月 Magic8 Pro 的提成是多少？"
+    ? hint.kb || "向企业知识库提问"
     : targetTable && mode === "agent"
     ? `针对 ${targetTable} 提问，例如：这个表按月份有什么变化？`
     : mode === "agent"
-      ? "描述你的业务问题，例如：本月各门店毛利目标达成怎么样？"
-      : "用自然语言查数据，例如：每个门店 8 月的销售额和毛利";
+      ? hint.agent || "描述你的业务问题"
+      : hint.query || "用自然语言查数据";
 
   return (
     <div className={`composer ${loading ? "is-busy" : ""}`}>
@@ -93,16 +96,18 @@ export default function Composer({
             >
               <Icon name="sparkles" size={14} /> 智能助手
             </button>
-            <button
-              type="button"
-              role="tab"
-              aria-selected={mode === "agent"}
-              className={mode === "agent" ? "active" : ""}
-              onClick={() => onModeChange("agent")}
-              disabled={loading}
-            >
-              <Icon name="trend" size={14} /> 经营分析
-            </button>
+            {analysisLabel && (
+              <button
+                type="button"
+                role="tab"
+                aria-selected={mode === "agent"}
+                className={mode === "agent" ? "active" : ""}
+                onClick={() => onModeChange("agent")}
+                disabled={loading}
+              >
+                <Icon name="trend" size={14} /> {analysisLabel}
+              </button>
+            )}
             <button
               type="button"
               role="tab"

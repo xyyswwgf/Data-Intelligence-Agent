@@ -331,12 +331,17 @@ export async function reindexKnowledgeBase(allPages = false) {
 // 知识库 / Wiki
 // ---------------------------------------------------------------------------
 
-export async function getWikiTree() {
-  return (await apiClient.get("/api/wiki/tree")).data;
+export async function getKnowledgeSpaces() {
+  return (await apiClient.get("/api/kb/spaces")).data;
 }
 
-export async function getWikiIndex() {
-  return (await apiClient.get("/api/wiki/index")).data;
+// spaceId 为空时返回所有可读空间的页面
+export async function getWikiTree(spaceId) {
+  return (await apiClient.get("/api/wiki/tree", { params: spaceId ? { space_id: spaceId } : {} })).data;
+}
+
+export async function getWikiIndex(spaceId) {
+  return (await apiClient.get("/api/wiki/index", { params: spaceId ? { space_id: spaceId } : {} })).data;
 }
 
 export async function getWikiTag(tag) {
@@ -375,9 +380,10 @@ export async function restoreWikiVersion(id, version) {
   return (await apiClient.post(`/api/wiki/pages/${id}/versions/${version}/restore`)).data;
 }
 
-export async function uploadKnowledgeDocument(file, { parentId, tags } = {}) {
+export async function uploadKnowledgeDocument(file, { parentId, tags, spaceId } = {}) {
   const formData = new FormData();
   formData.append("file", file);
+  if (spaceId) formData.append("space_id", String(spaceId));
   if (parentId) formData.append("parent_id", String(parentId));
   if (tags) formData.append("tags", tags);
   return (
@@ -603,4 +609,36 @@ export function exportMyData() {
 
 export async function deleteAllChats() {
   return (await apiClient.delete("/api/chat/sessions")).data;
+}
+
+// ---------------------------------------------------------------------------
+// 行业包
+// ---------------------------------------------------------------------------
+
+export async function listIndustryPacks() {
+  return (await apiClient.get("/api/admin/packs")).data;
+}
+
+export async function setIndustryPack(code) {
+  return (await apiClient.put("/api/admin/packs/active", { code })).data;
+}
+
+// ---------------------------------------------------------------------------
+// 准确率评测
+// ---------------------------------------------------------------------------
+
+export async function listEvalSets() {
+  return (await apiClient.get("/api/admin/evals/sets")).data;
+}
+
+export async function startEvalRun(payload) {
+  return (await apiClient.post("/api/admin/evals/runs", payload)).data;
+}
+
+export async function listEvalRuns() {
+  return (await apiClient.get("/api/admin/evals/runs")).data;
+}
+
+export async function getEvalRun(id) {
+  return (await apiClient.get(`/api/admin/evals/runs/${id}`)).data;
 }

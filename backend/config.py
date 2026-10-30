@@ -26,7 +26,7 @@ SYSTEM_TABLE_PREFIXES = tuple(
 )
 SYSTEM_TABLES = {
     "users", "agent_runs", "schema_migrations", "chat_sessions", "chat_messages", "user_memories",
-    "llm_profiles", "agent_tools", "agent_skills", "usage_records",
+    "llm_profiles", "agent_tools", "agent_skills", "usage_records", "organizations", "system_settings", "eval_runs",
 }
 # LLM / Agent 生成的 SQL 以该数据库角色执行：只对业务表有 SELECT 权限，读不到账号、审计、知识库等系统表
 SQL_READER_ROLE = os.getenv("SQL_READER_ROLE", "nl2sql_reader")

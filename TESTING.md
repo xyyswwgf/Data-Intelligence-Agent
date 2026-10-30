@@ -117,6 +117,18 @@ PY
 
 预期前两个返回 `True`，后两个返回 `False`。
 
+## 5.1 准确率评测
+
+在「设置 → 准确率评测」中运行，或用命令行（输出每题结果和通过率）：
+
+```bash
+.venv/bin/python -m backend.evals.runner --set retail_store
+.venv/bin/python -m backend.evals.runner --set retail_store --profile 2 --case store_profit --case top_staff
+```
+
+通过标准：用于正式使用的模型，门店零售评测集的通过率建议不低于 80%。未通过的题，在明细里对照「标准答案」和「回答摘录」，
+判断是模型能力、提示词还是数据口径的问题。
+
 ## 6. 常见问题
 
 `GET /` 返回 404：正常。`8000` 是 API 服务，前端访问 `http://localhost:5173`。

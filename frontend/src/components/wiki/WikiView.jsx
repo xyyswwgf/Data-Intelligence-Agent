@@ -12,6 +12,7 @@ import {
   createWikiPage,
   deleteWikiPage,
   getWikiPage,
+  getKnowledgeSpaces,
   getWikiTree,
   restoreWikiVersion,
   searchWiki,
@@ -24,11 +25,28 @@ import { extractErrorMessage } from "../../utils/format";
  *   侧边栏（navSlot）：搜索 + 新建 / 上传 / 导入门店数据 + 首页 + 页面目录
  *   主区：索引首页 / 页面阅读 / 编辑 / 新建 / 搜索结果
  */
-export default function WikiView({ slug, user, navSlot, onNavigate, onCloseNav, onAsk }) {
-  const canEdit = user.role === "editor" || user.role === "admin";
-  const canDelete = user.role === "admin";
+export default function WikiView({ slug, pack, navSlot, onNavigate, onCloseNav, onAsk }) {
+  const [spaces, setSpaces] = useState([]);
+  const [spaceId, setSpaceIdState] = useState(() => {
+    try {
+      return Number(localStorage.getItem("datamind.kbSpace")) || null;
+    } catch {
+      return null;
+    }
+  });
+  const setSpaceId = (id) => {
+    setSpaceIdState(id);
+    try {
+      localStorage.setItem("datamind.kbSpace", String(id));
+    } catch {
+      // 隐私模式下无法记住选择
+    }
+  };
+  const space = spaces.find((x) => x.id === spaceId) || spaces[0];
+  // 新建、上传的权限按当前空间：个人空间人人可写，企业空间需要编辑及以上角色
+  const canEdit = Boolean(space?.can_write);
 
-  const [tree, setTree] = useState([]);
+  const [allPages, setAllPages] = useState([]); // 所有可读空间的页面（判断链接是否存在）
   const [refreshKey, setRefreshKey] = useState(0);
   const [page, setPage] = useState(null);
   const [pageError, setPageError] = useState(null);
@@ -45,8 +63,10 @@ export default function WikiView({ slug, user, navSlot, onNavigate, onCloseNav, 
   const refresh = useCallback(() => setRefreshKey((k) => k + 1), []);
 
   useEffect(() => {
-    getWikiTree().then((data) => setTree(data.items)).catch(() => {});
+    getWikiTree().then((data) => setAllPages(data.items)).catch(() => {});
+    getKnowledgeSpaces().then((data) => setSpaces(data.items)).catch(() => {});
   }, [refreshKey]);
+  const tree = useMemo(() => allPages.filter((p) => p.space_id === space?.id), [allPages, space]);
 
   useEffect(() => {
     if (!slug) return;
@@ -56,6 +76,7 @@ export default function WikiView({ slug, user, navSlot, onNavigate, onCloseNav, 
         if (!cancelled) {
           setPage(data);
           setPageError(null);
+          if (data.space_id) setSpaceId(data.space_id); // 打开其他空间的页面时，目录跟着切换
         }
       })
       .catch((err) => {
@@ -69,7 +90,7 @@ export default function WikiView({ slug, user, navSlot, onNavigate, onCloseNav, 
     };
   }, [slug, refreshKey]);
 
-  const existingSlugs = useMemo(() => new Set(tree.map((p) => p.slug)), [tree]);
+  const existingSlugs = useMemo(() => new Set(allPages.map((p) => p.slug)), [allPages]);
   const currentPage = page && page.slug === slug ? page : null;
   const editing = currentPage && editingSlug === slug;
 
@@ -105,7 +126,7 @@ export default function WikiView({ slug, user, navSlot, onNavigate, onCloseNav, 
     setSaveError(null);
     try {
       if (draft) {
-        const created = await createWikiPage(values);
+        const created = await createWikiPage({ ...values, space_id: space?.id });
         setDraft(null);
         refresh();
         onNavigate(created.slug);
@@ -192,7 +213,7 @@ export default function WikiView({ slug, user, navSlot, onNavigate, onCloseNav, 
       </div>
     );
   } else if (!slug) {
-    main = <WikiHome onOpen={open} refreshKey={refreshKey} />;
+    main = <WikiHome onOpen={open} refreshKey={refreshKey} spaceId={space?.id} spaceName={space?.name} />;
   } else if (pageError === "notfound") {
     main = (
       <div className="empty-state">
@@ -227,8 +248,8 @@ export default function WikiView({ slug, user, navSlot, onNavigate, onCloseNav, 
       <WikiPage
         page={currentPage}
         existingSlugs={existingSlugs}
-        canEdit={canEdit}
-        canDelete={canDelete}
+        canEdit={Boolean(currentPage.can_write)}
+        canDelete={Boolean(currentPage.can_delete)}
         onOpen={open}
         onEdit={() => { setSaveError(null); setEditingSlug(slug); }}
         onHistory={() => setHistoryOpen(true)}
@@ -241,6 +262,17 @@ export default function WikiView({ slug, user, navSlot, onNavigate, onCloseNav, 
 
   const nav = (
     <div className="wiki-sidenav">
+      {spaces.length > 1 && (
+        <div className="segmented space-switch" role="tablist" aria-label="知识空间">
+          {spaces.map((x) => (
+            <button type="button" key={x.id} role="tab" aria-selected={x.id === space?.id}
+              className={x.id === space?.id ? "active" : ""} onClick={() => { setSpaceId(x.id); open(null); }}>
+              <Icon name={x.kind === "personal" ? "user" : "users"} size={13} /> {x.kind === "personal" ? "我的" : "企业"}
+              <span className="space-count">{x.pages}</span>
+            </button>
+          ))}
+        </div>
+      )}
       <form className="wiki-search" onSubmit={runSearch} role="search">
         <Icon name="search" size={15} />
         <input value={query} onChange={(e) => setQuery(e.target.value)} placeholder="搜索知识库…" aria-label="搜索知识库" />
@@ -252,13 +284,15 @@ export default function WikiView({ slug, user, navSlot, onNavigate, onCloseNav, 
           </button>
           <div className="wiki-nav-actions">
             <button type="button" className="ghost-btn" onClick={() => { onCloseNav(); setUploadOpen(true); }}><Icon name="upload" size={14} /> 上传文档</button>
-            <button type="button" className="ghost-btn" onClick={() => { onCloseNav(); setStoreDataFiles([]); }}><Icon name="database" size={14} /> 导入门店数据</button>
+            {pack?.store_import && space?.kind === "org" && (
+              <button type="button" className="ghost-btn" onClick={() => { onCloseNav(); setStoreDataFiles([]); }}><Icon name="database" size={14} /> 导入门店数据</button>
+            )}
           </div>
         </>
       )}
       <nav className="side-section">
         <button type="button" className={`side-item ${!slug && !draft && !results ? "active" : ""}`} onClick={() => open(null)}>
-          <Icon name="home" size={16} /><span className="side-text">知识库首页</span>
+          <Icon name="home" size={16} /><span className="side-text">{space?.name || "知识库"}首页</span>
         </button>
       </nav>
       <nav className="side-section grow">
@@ -280,12 +314,16 @@ export default function WikiView({ slug, user, navSlot, onNavigate, onCloseNav, 
       )}
       {uploadOpen && (
         <UploadDialog
+          spaceId={space?.id}
+          spaceName={space?.name}
           pages={tree}
           defaultParentId={currentPage?.id}
           onClose={() => setUploadOpen(false)}
           onDone={refresh}
           onOpen={(target) => { setUploadOpen(false); open(target); }}
-          onStoreData={(files) => { setUploadOpen(false); setStoreDataFiles(files); }}
+          onStoreData={pack?.store_import && space?.kind === "org" && canEdit
+            ? (files) => { setUploadOpen(false); setStoreDataFiles(files); }
+            : null}
         />
       )}
       {storeDataFiles && (

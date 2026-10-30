@@ -28,19 +28,19 @@ from backend.assistant.tools import ToolContext, args_preview, execute, load_reg
 from backend.config import AGENT_MAX_STEPS
 from backend.llm_gateway import LLMError, describe, get_provider
 from backend.market import disabled_keys
+from backend.packs import active_pack
 
 logger = logging.getLogger("nl2sql.assistant")
 
 _SYSTEM = """你是 DataMind，企业内部的数据智能助手，服务于 {user_name}（角色：{role}）。今天是 {today}。
 
 ## 你的能力
-你可以调用工具：检索企业知识库、查看数据表结构、执行只读 SQL、运行门店经营分析、分析用户导入的 CSV 表、记住用户的长期信息。
+你可以调用工具：检索企业知识库、查看数据表结构、执行只读 SQL、运行行业专属分析（如有）、分析用户导入的 CSV 表、记住用户的长期信息。
 
 ## 推理方式
 1. 先想清楚：回答这个问题需要哪些事实？哪些来自知识库（口径、规则），哪些来自数据（数字）？
 2. 用工具获取证据。不知道表结构时先 list_tables / describe_tables，再写 SQL；SQL 报错就根据报错修正后重试。
-3. 门店经营概况、任务达成、「为什么没达成 / 哪些拖累」这类问题优先用 business_analysis；导入的 CSV 表用 analyze_imported_table。
-   产品政策、提成、考核、运营商套餐等规则先 search_knowledge。
+3. {pack_hint}导入的 CSV 表用 analyze_imported_table；口径、制度、规则类问题先 search_knowledge。
 4. 证据足够就停止调用工具，不要重复查询同样的内容。最多 {max_steps} 步。
 5. 业务数据不一定更新到今天。用户说「本月 / 上月 / 最近」时，先确认数据的实际时间范围；若数据未覆盖，
    按数据中最新的月份理解，并在回答里明确说明你采用的时间范围。
@@ -59,8 +59,9 @@ def _event(event_type: str, **data: Any) -> dict[str, Any]:
 
 def _system_prompt(user: dict, target_table: str | None) -> str:
     target = f"\n\n当前用户正在分析导入表 {target_table}，涉及「这个表」时指的就是它。" if target_table else ""
+    pack = active_pack()
     return _SYSTEM.format(user_name=user["display_name"], role=user["role"], today=date.today().isoformat(),
-                          max_steps=AGENT_MAX_STEPS, target=target)
+                          max_steps=AGENT_MAX_STEPS, target=target, pack_hint=pack.assistant_hint)
 
 
 def run_turn(
@@ -70,12 +71,14 @@ def run_turn(
     target_table: str | None = None,
     profile_id: int | None = None,
     skill: str | None = None,
+    remember: bool = True,
 ) -> Iterator[dict]:
     """
     执行一轮对话，逐步产出事件；最后一个事件是 done（含落库的消息）或 error。
 
     profile_id：本轮使用的模型配置（为空时沿用会话上次的模型，再退回默认模型）
     skill：用户手动指定的技能，指引直接注入本轮上下文
+    remember：为 False 时本轮不读写长期记忆（准确率评测用，避免把评测问答写进管理员的记忆）
     """
     session = sessions.get_session(user["id"], session_id)
     if not session:
@@ -93,7 +96,7 @@ def run_turn(
         yield _event("session", title=title)
     yield _event("model", **model_info)
 
-    use_memory = memory_store.memory_enabled_for(user["id"])
+    use_memory = remember and memory_store.memory_enabled_for(user["id"])
     trace: list[dict] = []
 
     # 明确的「记住…」指令：不依赖大模型也能写入记忆
@@ -170,11 +173,19 @@ def _react(provider, user, session, question, target_table, use_memory, trace, s
     for step in range(1, AGENT_MAX_STEPS + 2):
         final_round = step > AGENT_MAX_STEPS
         try:
-            resp = provider.chat(
+            # 流式调用：文字边生成边推给前端（delta 事件不落库）；这一步若转为调用工具，前端丢弃草稿
+            stream = provider.stream_chat(
                 ctx.system, messages,
                 tools=None if final_round else specs,
                 thinking=True,  # 是否真正开启由 Provider 按 LLM_THINKING_BUDGET / LLM_REASONING_EFFORT 决定
             )
+            while True:
+                try:
+                    channel, piece = next(stream)
+                except StopIteration as stop:
+                    resp = stop.value
+                    break
+                yield _event("delta", step=step, channel="answer" if channel == "text" else "reasoning", text=piece)
         except LLMError as exc:
             ev = _event("error", message=str(exc))
             trace.append(ev)
@@ -278,16 +289,13 @@ def _merge_citations(citations: list[dict], answer: str) -> list[dict]:
 # 未配置大模型时的规则路由
 # ---------------------------------------------------------------------------
 
-_ANALYSIS_WORDS = ("为什么", "原因", "下降", "上升", "归因", "拖累", "经营", "销售额", "毛利", "达成", "目标", "台数", "库龄", "门店")
-
-
 def _fallback(user, session_id, question, target_table, trace) -> Iterator[dict]:
     tool_ctx = ToolContext(user["id"], session_id, False, target_table, role=user["role"])
     registry = load_registry(user["role"], False, False)
     if target_table:
         name, args = "analyze_imported_table", {"table_name": target_table, "question": question}
-    elif any(w in question for w in _ANALYSIS_WORDS):
-        name, args = "business_analysis", {"question": question}
+    elif (pack := active_pack()).analysis_tool and any(w in question for w in pack.analysis_words):
+        name, args = pack.analysis_tool, {"question": question}
     else:
         name, args = "search_knowledge", {"query": question}
     ev = _event("thinking", step=1, kind="plan",

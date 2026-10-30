@@ -163,7 +163,7 @@ function ToolStep({ call, result }) {
 }
 
 /** 推理轨迹：思考 → 工具调用 → 观察，按事件顺序展示 */
-export function ReasoningTrace({ events, live }) {
+export function ReasoningTrace({ events, live, draft }) {
   const [collapsed, setCollapsed] = useState(false);
   const items = useMemo(() => {
     const results = new Map(events.filter((e) => e.type === "tool_result").map((e) => [e.id, e]));
@@ -216,10 +216,16 @@ export function ReasoningTrace({ events, live }) {
               }
               return <ToolStep key={item.id || i} call={item} result={item.result} />;
             })}
-            {live && (
+            {live && draft?.reasoning && (
+              <li className="trace-thought streaming">
+                <span className="trace-icon"><Icon name="sparkles" size={13} /></span>
+                <p>{draft.reasoning.slice(-1200)}</p>
+              </li>
+            )}
+            {live && !draft?.reasoning && (
               <li className="trace-thought waiting">
                 <span className="trace-icon"><span className="send-spinner dark" /></span>
-                <p>{items.length ? "继续推理中…" : "正在组装上下文、思考需要哪些信息…"}</p>
+                <p>{draft?.answer ? "正在撰写回答…" : items.length ? "继续推理中…" : "正在组装上下文、思考需要哪些信息…"}</p>
               </li>
             )}
           </ol>
@@ -230,7 +236,7 @@ export function ReasoningTrace({ events, live }) {
 }
 
 /** 最终回答：Markdown + [[页面]] 引用 + 来源卡片 + 用量 */
-export function AssistantFinal({ content, citations, usage, onOpenPage }) {
+export function AssistantFinal({ content, citations, usage, onOpenPage, streaming = false }) {
   const html = useMemo(() => renderMarkdown(content).html, [content]);
   const onClick = (e) => {
     const link = e.target.closest("a[data-wiki]");
@@ -242,7 +248,7 @@ export function AssistantFinal({ content, citations, usage, onOpenPage }) {
   const cited = (citations || []).filter((c) => c.cited !== false);
   return (
     <div className="answer">
-      <div className="summary kb-answer">
+      <div className={`summary kb-answer ${streaming ? "is-streaming" : ""}`}>
         <div className="markdown-body" onClick={onClick} dangerouslySetInnerHTML={{ __html: html }} />
         {usage && (usage.steps != null || usage.input_tokens) && (
           <div className="summary-meta">

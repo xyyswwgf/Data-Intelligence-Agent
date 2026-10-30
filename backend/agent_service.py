@@ -58,6 +58,7 @@ _FOCUS_KEYWORDS = {
 
 
 class AgentState(TypedDict, total=False):
+    user_id: int | None
     question: str
     analysis_mode: str
     run_id: str
@@ -80,6 +81,7 @@ _COMPILED_GRAPH = None
 
 def run_analysis(question: str, analysis_mode: str = "auto", user_id: int | None = None) -> dict[str, Any]:
     state: AgentState = {
+        "user_id": user_id,
         "question": question.strip(),
         "analysis_mode": analysis_mode,
         "run_id": str(uuid.uuid4()),
@@ -203,7 +205,12 @@ def knowledge_node(state: AgentState) -> AgentState:
         try:
             from backend.kb.rag import knowledge_for_agent
 
-            state["knowledge"] = knowledge_for_agent(state["question"])
+            spaces = None
+            if state.get("user_id"):
+                from backend.kb.spaces import readable_spaces
+
+                spaces = readable_spaces(state["user_id"])
+            state["knowledge"] = knowledge_for_agent(state["question"], spaces=spaces)
         except Exception as exc:
             logger.warning("企业知识库检索失败: %s", exc)
             state["knowledge"] = []

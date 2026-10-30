@@ -313,3 +313,73 @@ def delete_skill(skill_id: int, user: CurrentUser = Admin):
     _errors(skill_store.delete_skill, skill_id)
     auth.audit("skill_delete", user, "agent_skill", skill_id)
     return {"ok": True}
+
+
+# ---------------------------------------------------------------------------
+# 行业包
+# ---------------------------------------------------------------------------
+
+
+class PackIn(BaseModel):
+    code: str = Field(..., min_length=1, max_length=32)
+
+
+@router.get("/packs")
+def list_packs(user: CurrentUser = Admin):
+    from backend.packs import PACKS, active_pack
+
+    active = active_pack().code
+    return {"active": active, "items": [{**p.public(), "active": p.code == active} for p in PACKS.values()]}
+
+
+@router.put("/packs/active")
+def set_pack(req: PackIn, user: CurrentUser = Admin):
+    from backend.packs import set_active_pack
+
+    pack = _errors(set_active_pack, req.code)
+    auth.audit("pack_switch", user, "industry_pack", pack.code, {"name": pack.name})
+    return pack.public()
+
+
+# ---------------------------------------------------------------------------
+# 准确率评测
+# ---------------------------------------------------------------------------
+
+
+class EvalRunIn(BaseModel):
+    set_code: str = Field(..., min_length=1, max_length=64)
+    profile_id: int | None = None
+    case_ids: list[str] | None = None
+
+
+@router.get("/evals/sets")
+def eval_sets(user: CurrentUser = Admin):
+    from backend.evals.runner import list_sets
+
+    return {"items": [{"code": s["code"], "name": s["name"], "description": s.get("description", ""),
+                       "pack": s.get("pack"), "private": s["private"],
+                       "cases": [{"id": c["id"], "mode": c.get("mode", "assistant"), "question": c["question"]}
+                                 for c in s["cases"]]} for s in list_sets()]}
+
+
+@router.post("/evals/runs", status_code=201)
+def eval_start(req: EvalRunIn, user: CurrentUser = Admin):
+    from backend.evals.runner import start_run
+
+    run = _errors(start_run, req.set_code, req.profile_id, user.id, req.case_ids)
+    auth.audit("eval_run", user, "eval_run", str(run["id"]), {"set": req.set_code, "profile_id": req.profile_id})
+    return run
+
+
+@router.get("/evals/runs")
+def eval_runs(user: CurrentUser = Admin):
+    from backend.evals.runner import list_runs
+
+    return {"items": list_runs()}
+
+
+@router.get("/evals/runs/{run_id}")
+def eval_run(run_id: int, user: CurrentUser = Admin):
+    from backend.evals.runner import get_run
+
+    return _errors(get_run, run_id)

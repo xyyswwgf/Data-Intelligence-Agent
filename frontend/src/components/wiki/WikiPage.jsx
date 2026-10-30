@@ -49,6 +49,11 @@ export default function WikiPage({ page, existingSlugs, canEdit, canDelete, onOp
           <div>
             <h1>{page.title}</h1>
             <p className="wiki-meta">
+              {page.space_name && (
+                <span className={`space-pill ${page.space_kind}`}>
+                  <Icon name={page.space_kind === "personal" ? "user" : "users"} size={11} /> {page.space_name}
+                </span>
+              )}
               v{page.version} · {page.updated_by_name || "系统"} 更新于 {formatTime(page.updated_at)}
               <span className={`index-pill ${indexTone}`} title={page.index_error || ""}>{indexLabel}</span>
             </p>

@@ -37,6 +37,8 @@ const ACTION_LABEL = {
   data_export: "导出个人数据",
   chat_clear: "删除全部对话",
   memory_clear: "清空记忆",
+  pack_switch: "切换行业包",
+  eval_run: "运行准确率评测",
 };
 
 const fmt = (v) => (v ? new Date(v).toLocaleString("zh-CN") : "—");

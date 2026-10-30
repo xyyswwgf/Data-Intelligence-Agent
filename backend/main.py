@@ -309,6 +309,12 @@ def health_check():
     }
 
 
+def _active_pack_public() -> dict:
+    from backend.packs import active_pack
+
+    return active_pack().public()
+
+
 @app.get("/api/info")
 def data_source_info(user: CurrentUser = Depends(get_current_user)):
     """
@@ -322,6 +328,7 @@ def data_source_info(user: CurrentUser = Depends(get_current_user)):
             "charset": "UTF8",
         },
         "tables": _load_table_details(),
+        "pack": _active_pack_public(),
         "pipeline": [
             {"step": 1, "actor": "用户", "action": "输入自然语言问题"},
             {"step": 2, "actor": "LLM 大模型", "action": "结合数据库 DDL 结构生成 SQL"},
