@@ -62,9 +62,10 @@ def markdown_table(columns: list[str], rows: list[list], limit: int = _MODEL_TAB
 
 def _search_knowledge(args: dict, ctx: ToolContext) -> ToolResult:
     from backend.kb.retrieval import search
+    from backend.kb.spaces import readable_spaces
 
     query = str(args.get("query", "")).strip()
-    result = search(query, top_k=min(int(args.get("top_k", 5) or 5), 8))
+    result = search(query, top_k=min(int(args.get("top_k", 5) or 5), 8), spaces=readable_spaces(ctx.user_id))
     hits = result["hits"]
     if not hits:
         return ToolResult("知识库中没有找到相关内容。", {"citations": []}, summary="未找到相关知识")
@@ -262,9 +263,10 @@ BUILTIN_TOOLS: dict[str, Tool] = {
                           "sql": {"type": "string", "description": "单条 SELECT 语句"},
                           "purpose": {"type": "string", "description": "这条查询要回答什么"}},
                        "required": ["sql"]}), _run_sql),
+        # 门店零售行业包的专属分析（只有启用该行业包时才提供）
         Tool(ToolSpec("business_analysis", "门店经营分析：各门店销售额、毛利、手机台数、毛利目标达成，产品线 / 店员 / 收款方式结构，"
                       "长库龄库存。回答「门店经营怎么样」「为什么没达成」「哪个门店 / 产品线 / 店员拖累」这类问题时使用；"
-                      "question 中可带门店名（望京 / 南锣 / 乐堤港 / 阳光）和月份。",
+                      "question 中可带门店名（简称或商场名）和月份。",
                       {"type": "object", "properties": {"question": {"type": "string"}}, "required": ["question"]}),
              _business_analysis),
         Tool(ToolSpec("analyze_imported_table", "对用户导入的 CSV 表（csv_ 前缀）做趋势、分组、缺失、异常分析。",
@@ -313,6 +315,9 @@ def load_registry(role: str, memory_enabled: bool, has_skills: bool, disabled: s
     from backend.database import get_connection
     from sqlalchemy import text
 
+    from backend.packs import PACK_TOOLS, active_pack
+
+    pack_tool = active_pack().analysis_tool
     with get_connection() as conn:
         rows = conn.execute(text("SELECT * FROM agent_tools WHERE enabled ORDER BY id")).mappings().all()
     specs, custom = [], {}
@@ -321,6 +326,8 @@ def load_registry(role: str, memory_enabled: bool, has_skills: bool, disabled: s
             continue
         name = row["name"]
         if row["kind"] == "builtin":
+            if name in PACK_TOOLS and name != pack_tool:
+                continue
             if name not in BUILTIN_TOOLS or (name == "remember" and not memory_enabled) or (name == "use_skill" and not has_skills):
                 continue
             specs.append(BUILTIN_TOOLS[name].spec)

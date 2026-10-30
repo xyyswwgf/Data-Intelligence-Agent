@@ -7,6 +7,7 @@ os.environ.setdefault("ADMIN_PASSWORD", "Admin12345")
 os.environ["KB_INDEX_ASYNC"] = "false"  # 索引同步执行，测试结果可预期
 os.environ.setdefault("EMBEDDING_PROVIDER", "none")  # 默认不依赖外部 Embedding 服务
 os.environ.setdefault("KB_STORAGE_DIR", tempfile.mkdtemp(prefix="kb_test_"))
+os.environ["STORE_CONFIG_FILE"] = ""  # 不读取本机的真实门店配置，测试只用虚构的示例门店
 
 # 测试使用独立的数据库（<DB_NAME>_test），写入虚构样例数据，不触碰开发库里的真实门店数据。
 # 显式设置 DATABASE_URL 时按其执行（CI 等场景自行准备数据库）。

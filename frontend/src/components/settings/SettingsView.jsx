@@ -10,13 +10,15 @@ import { SETTINGS_GROUPS, visibleSections } from "../../navigation";
 import { AboutSection, AccountSection, GeneralSection, PrivacySection } from "./PersonalSections";
 import { PlanSection, UsageSection } from "./BillingSections";
 import BillingAdminPanel from "./BillingAdminPanel";
+import PacksPanel from "./PacksPanel";
+import EvalsPanel from "./EvalsPanel";
 
 /**
  * 整页设置：个人设置、用量与账单、管理（仅管理员）合在一处。
  * 分区导航（含搜索）渲染在侧边栏，页面只显示当前分区。
  */
 export default function SettingsView({ section, navSlot, onNavigate, user, account, sourceInfo, models, modelId,
-  onModelChange, defaultMode, onDefaultModeChange, onPasswordChanged, onChatsDeleted }) {
+  onModelChange, defaultMode, onDefaultModeChange, onPasswordChanged, onChatsDeleted, onPackChanged }) {
   const [query, setQuery] = useState("");
   const sections = visibleSections(user);
   const current = sections.find((s) => s.id === section) || sections[0];
@@ -66,10 +68,12 @@ export default function SettingsView({ section, navSlot, onNavigate, user, accou
       {current.id === "usage" && <UsageSection account={account} />}
       {current.id === "plan" && <PlanSection account={account} />}
       {current.id === "members" && <UsersPanel currentUser={user} />}
+      {current.id === "packs" && <PacksPanel onChanged={onPackChanged} />}
       {current.id === "billing-admin" && <BillingAdminPanel />}
       {current.id === "models" && <ModelsPanel />}
       {current.id === "skills" && <SkillsPanel />}
       {current.id === "tools" && <ToolsPanel />}
+      {current.id === "evals" && <EvalsPanel />}
       {current.id === "audit" && <AuditPanel />}
       {current.id === "system" && <SystemPanel />}
       {current.id === "about" && <AboutSection sourceInfo={sourceInfo} />}

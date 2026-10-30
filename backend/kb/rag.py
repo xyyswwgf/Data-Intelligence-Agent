@@ -24,9 +24,10 @@ _SYSTEM = """你是企业知识库助手。只能依据【参考资料】回答�
 """
 
 
-def ask(question: str, top_k: int = RAG_TOP_K, provider=None) -> dict:
+def ask(question: str, top_k: int = RAG_TOP_K, provider=None, spaces: list[int] | None = None) -> dict:
+    """spaces：提问人可读的知识空间（企业空间 + 个人空间）。"""
     question = question.strip()
-    result = search(question, top_k=top_k)
+    result = search(question, top_k=top_k, spaces=spaces)
     hits = result["hits"]
     citations = [{"n": i + 1, **hit.to_dict()} for i, hit in enumerate(hits)]
 
@@ -66,9 +67,9 @@ def ask(question: str, top_k: int = RAG_TOP_K, provider=None) -> dict:
             "retrieval": result["mode"], "generation": "extractive"}
 
 
-def knowledge_for_agent(question: str, limit: int = 6) -> list[dict]:
+def knowledge_for_agent(question: str, limit: int = 6, spaces: list[int] | None = None) -> list[dict]:
     """供经营分析 Agent 的「检索业务知识」节点使用。"""
-    hits = search(question, top_k=limit)["hits"]
+    hits = search(question, top_k=limit, spaces=spaces)["hits"]
     return [
         {"source": f"{h.title}" + (f" / {h.heading_path}" if h.heading_path else ""), "content": h.content[:400], "slug": h.slug}
         for h in hits

@@ -571,6 +571,90 @@ def _m011_billing_and_market(conn: Connection) -> None:
                "def": default, "o": order})
 
 
+def _m012_orgs_spaces_settings(conn: Connection) -> None:
+    """
+    企业（组织）与知识空间：每个企业一个共享的企业空间，每个成员一个只有自己可见的个人空间；
+    知识库页面和文档都归属一个空间。现有知识库全部归入默认企业的企业空间。
+    另加系统设置表（当前行业包等）。
+    """
+    conn.execute(text("""
+        CREATE TABLE IF NOT EXISTS system_settings (
+            key VARCHAR(64) PRIMARY KEY,
+            value JSONB NOT NULL,
+            updated_at TIMESTAMPTZ NOT NULL DEFAULT now()
+        );
+
+        CREATE TABLE IF NOT EXISTS organizations (
+            id BIGSERIAL PRIMARY KEY,
+            name VARCHAR(100) NOT NULL,
+            created_at TIMESTAMPTZ NOT NULL DEFAULT now()
+        );
+    """))
+    org_id = conn.execute(text("SELECT id FROM organizations ORDER BY id LIMIT 1")).scalar()
+    if org_id is None:
+        org_id = conn.execute(text("INSERT INTO organizations (name) VALUES ('我的企业') RETURNING id")).scalar()
+    conn.execute(text(f"""
+        ALTER TABLE users ADD COLUMN IF NOT EXISTS org_id BIGINT REFERENCES organizations(id);
+        UPDATE users SET org_id = {int(org_id)} WHERE org_id IS NULL;
+        ALTER TABLE users ALTER COLUMN org_id SET DEFAULT {int(org_id)};
+        ALTER TABLE users ALTER COLUMN org_id SET NOT NULL;
+
+        CREATE TABLE IF NOT EXISTS kb_spaces (
+            id BIGSERIAL PRIMARY KEY,
+            org_id BIGINT NOT NULL REFERENCES organizations(id) ON DELETE CASCADE,
+            kind VARCHAR(16) NOT NULL CHECK (kind IN ('org', 'personal', 'team')),
+            name VARCHAR(100) NOT NULL,
+            owner_id BIGINT REFERENCES users(id) ON DELETE CASCADE,
+            created_at TIMESTAMPTZ NOT NULL DEFAULT now(),
+            CHECK ((kind = 'personal') = (owner_id IS NOT NULL))
+        );
+        CREATE UNIQUE INDEX IF NOT EXISTS uq_kb_spaces_personal ON kb_spaces (owner_id) WHERE kind = 'personal';
+        CREATE UNIQUE INDEX IF NOT EXISTS uq_kb_spaces_org ON kb_spaces (org_id) WHERE kind = 'org';
+    """))
+    space_id = conn.execute(text("""
+        INSERT INTO kb_spaces (org_id, kind, name) VALUES (:o, 'org', '企业知识库')
+        ON CONFLICT (org_id) WHERE kind = 'org' DO UPDATE SET name = kb_spaces.name RETURNING id
+    """), {"o": org_id}).scalar()
+    conn.execute(text(f"""
+        ALTER TABLE wiki_pages ADD COLUMN IF NOT EXISTS space_id BIGINT REFERENCES kb_spaces(id) ON DELETE CASCADE;
+        UPDATE wiki_pages SET space_id = {int(space_id)} WHERE space_id IS NULL;
+        ALTER TABLE wiki_pages ALTER COLUMN space_id SET NOT NULL;
+        CREATE INDEX IF NOT EXISTS idx_wiki_pages_space ON wiki_pages (space_id) WHERE NOT is_deleted;
+
+        ALTER TABLE kb_documents ADD COLUMN IF NOT EXISTS space_id BIGINT REFERENCES kb_spaces(id) ON DELETE CASCADE;
+        UPDATE kb_documents SET space_id = {int(space_id)} WHERE space_id IS NULL;
+        ALTER TABLE kb_documents ALTER COLUMN space_id SET NOT NULL;
+        -- 同一份文件可以分别放进个人空间和企业空间：去重改为按空间
+        ALTER TABLE kb_documents DROP CONSTRAINT IF EXISTS kb_documents_sha256_key;
+        CREATE UNIQUE INDEX IF NOT EXISTS uq_kb_documents_space_sha ON kb_documents (space_id, sha256);
+    """))
+
+
+def _m013_eval_runs(conn: Connection) -> None:
+    """准确率评测的运行记录：用例快照、逐题结果、通过率。"""
+    conn.execute(text("""
+        CREATE TABLE IF NOT EXISTS eval_runs (
+            id BIGSERIAL PRIMARY KEY,
+            set_code VARCHAR(64) NOT NULL,
+            set_name VARCHAR(200) NOT NULL,
+            profile_id BIGINT REFERENCES llm_profiles(id) ON DELETE SET NULL,
+            model_name VARCHAR(200),
+            status VARCHAR(16) NOT NULL DEFAULT 'queued' CHECK (status IN ('queued', 'running', 'done', 'failed')),
+            total INT NOT NULL DEFAULT 0,
+            done INT NOT NULL DEFAULT 0,
+            scored INT NOT NULL DEFAULT 0,
+            passed INT NOT NULL DEFAULT 0,
+            cases JSONB NOT NULL DEFAULT '[]'::jsonb,
+            results JSONB NOT NULL DEFAULT '[]'::jsonb,
+            error TEXT,
+            created_by BIGINT REFERENCES users(id) ON DELETE SET NULL,
+            created_at TIMESTAMPTZ NOT NULL DEFAULT now(),
+            started_at TIMESTAMPTZ,
+            finished_at TIMESTAMPTZ
+        );
+    """))
+
+
 MIGRATIONS: list[tuple[int, str, Callable[[Connection], None]]] = [
     (1, "core schema: users, audit, wiki, kb, agent_runs", _m001_core_schema),
     (2, "read-only SQL role for LLM/agent queries", _m002_reader_role),
@@ -583,6 +667,8 @@ MIGRATIONS: list[tuple[int, str, Callable[[Connection], None]]] = [
     (9, "exclude transfers and wholesale from store sales", _m009_drop_non_retail),
     (10, "mask phone and id numbers in remarks", _m010_mask_remarks),
     (11, "usage metering, plans, wallet, billing and market prefs", _m011_billing_and_market),
+    (12, "organizations, knowledge spaces and system settings", _m012_orgs_spaces_settings),
+    (13, "accuracy evaluation runs", _m013_eval_runs),
 ]
 
 

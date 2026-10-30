@@ -267,7 +267,7 @@ function App() {
           updateTurn(id, { model: ev });
         } else if (ev.type === "done") {
           if (activeMode === "assistant") {
-            updateTurn(id, { status: "done", content: ev.content, citations: ev.citations, usage: ev.usage });
+            updateTurn(id, { status: "done", content: ev.content, citations: ev.citations, usage: ev.usage, draft: null });
           } else if (ev.error) {
             updateTurn(id, { status: "error", error: ev.error });
           } else if (activeMode === "query") {
@@ -275,8 +275,15 @@ function App() {
           } else {
             updateTurn(id, { status: "done", result: ev.result });
           }
+        } else if (ev.type === "delta") {
+          // 正在生成的文字：按步骤累积成草稿，不进入推理轨迹
+          updateTurn(id, (t) => {
+            const prev = t.draft && t.draft.step === ev.step ? t.draft : { step: ev.step, answer: "", reasoning: "" };
+            return { draft: { ...prev, [ev.channel]: prev[ev.channel] + ev.text } };
+          });
         } else {
-          updateTurn(id, (t) => ({ events: [...(t.events || []), ev] }));
+          // 这一步有了定论（转为思考记录 / 调用工具），草稿作废
+          updateTurn(id, (t) => ({ events: [...(t.events || []), ev], draft: null }));
         }
       });
       // 流结束但没有收到 done（例如网络中断）
@@ -423,6 +430,7 @@ function App() {
 
         {view === "chat" && (
           <ChatView
+            pack={sourceInfo?.pack}
             turns={turns}
             loading={loading}
             mode={mode}
@@ -443,7 +451,7 @@ function App() {
         {view === "wiki" && (
           <WikiView
             slug={route.slug}
-            user={user}
+            pack={sourceInfo?.pack}
             navSlot={slot}
             onNavigate={(slug) => go(slug ? `/wiki/${encodeURIComponent(slug)}` : "/wiki")}
             onCloseNav={() => setSidebarOpen(false)}
@@ -469,6 +477,7 @@ function App() {
             onDefaultModeChange={setDefaultMode}
             onPasswordChanged={handlePasswordChanged}
             onChatsDeleted={() => { setTurns([]); setLoadedSessionId(null); fetchSessions(); }}
+            onPackChanged={() => { fetchInfo(); setMode(defaultMode); }}
           />
         )}
       </main>

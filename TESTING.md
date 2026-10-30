@@ -68,9 +68,9 @@ curl -s -X POST http://127.0.0.1:8000/api/analyze \
 
 推荐继续测试（关注点不同，关键发现的第一条随之变化）：
 
-- 「乐堤港 8 月为什么没达成目标」：只分析乐堤港
-- 「2026年7月望京的经营情况」：指定月份；没有上一个月数据时不显示环比
-- 「哪些门店长库龄库存最多」「南锣店员的业绩和提成」
+- 「滨河 8 月为什么没达成目标」：只分析滨河
+- 「2026年7月城东的经营情况」：指定月份；没有上一个月数据时不显示环比
+- 「哪些门店长库龄库存最多」「老城店员的业绩和提成」
 
 历史与导出：`GET /api/analysis/history`、`GET /api/analysis/{run_id}/export?format=markdown|html`。
 
@@ -116,6 +116,18 @@ PY
 ```
 
 预期前两个返回 `True`，后两个返回 `False`。
+
+## 5.1 准确率评测
+
+在「设置 → 准确率评测」中运行，或用命令行（输出每题结果和通过率）：
+
+```bash
+.venv/bin/python -m backend.evals.runner --set retail_store
+.venv/bin/python -m backend.evals.runner --set retail_store --profile 2 --case store_profit --case top_staff
+```
+
+通过标准：用于正式使用的模型，门店零售评测集的通过率建议不低于 80%。未通过的题，在明细里对照「标准答案」和「回答摘录」，
+判断是模型能力、提示词还是数据口径的问题。
 
 ## 6. 常见问题
 

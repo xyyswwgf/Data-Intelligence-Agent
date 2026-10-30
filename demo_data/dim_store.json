@@ -1,0 +1,46 @@
+[
+ {
+  "store_code": "store_east",
+  "store_name": "城东万达店",
+  "short_name": "城东",
+  "mall": "城东万达广场",
+  "aliases": [
+   "城东",
+   "万达",
+   "城东仓"
+  ]
+ },
+ {
+  "store_code": "store_old",
+  "store_name": "老城步行街店",
+  "short_name": "老城",
+  "mall": "老城步行街",
+  "aliases": [
+   "老城",
+   "步行街",
+   "老城仓"
+  ]
+ },
+ {
+  "store_code": "store_river",
+  "store_name": "滨河天街店",
+  "short_name": "滨河",
+  "mall": "滨河天街",
+  "aliases": [
+   "滨河",
+   "天街",
+   "滨河仓"
+  ]
+ },
+ {
+  "store_code": "store_new",
+  "store_name": "新区中心店",
+  "short_name": "新区",
+  "mall": "新区中心广场",
+  "aliases": [
+   "新区",
+   "中心广场",
+   "新区仓"
+  ]
+ }
+]

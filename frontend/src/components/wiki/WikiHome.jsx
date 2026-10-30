@@ -15,20 +15,26 @@ function formatSize(bytes) {
 }
 
 /** 知识库索引首页：统计、标签索引、最近更新、待完善事项、文档入库记录 */
-export default function WikiHome({ onOpen, refreshKey }) {
+export default function WikiHome({ onOpen, refreshKey, spaceId, spaceName }) {
   const [index, setIndex] = useState(null);
   const [error, setError] = useState(null);
   const [tag, setTag] = useState(null);
   const [tagPages, setTagPages] = useState([]);
 
   useEffect(() => {
-    getWikiIndex()
+    if (!spaceId) return undefined; // 等知识空间确定后再加载，避免先显示全部空间的统计
+    let cancelled = false; // 切换空间时，先发出的请求可能后返回：丢弃过期的结果
+    getWikiIndex(spaceId)
       .then((data) => {
+        if (cancelled) return;
         setIndex(data);
         setError(null);
       })
-      .catch((err) => setError(extractErrorMessage(err)));
-  }, [refreshKey]);
+      .catch((err) => !cancelled && setError(extractErrorMessage(err)));
+    return () => {
+      cancelled = true;
+    };
+  }, [refreshKey, spaceId]);
 
   useEffect(() => {
     if (!tag) return;
@@ -43,8 +49,8 @@ export default function WikiHome({ onOpen, refreshKey }) {
   return (
     <div className="wiki-home">
       <header className="wiki-home-head">
-        <h1>知识库索引</h1>
-        <p>所有上传的文档都会转换为 Markdown 页面，自动切块索引，供搜索和知识问答引用。</p>
+        <h1>{spaceName || "知识库"}</h1>
+        <p>上传的文档会转换为 Markdown 页面，自动切块索引，供搜索和知识问答引用。提问和搜索会同时检索企业知识库和你的个人知识库。</p>
       </header>
 
       <div className="metric-grid">
@@ -53,8 +59,8 @@ export default function WikiHome({ onOpen, refreshKey }) {
         <div className="metric-card"><span className="metric-name">检索切块</span><strong>{stats.chunks}</strong></div>
         <div className="metric-card">
           <span className="metric-name">向量覆盖率</span>
-          <strong>{coverage}%</strong>
-          <span className={`delta ${coverage === 100 ? "up" : "down"}`}>{stats.embedded_chunks}/{stats.chunks}</span>
+          <strong>{stats.chunks ? `${coverage}%` : "—"}</strong>
+          {stats.chunks > 0 && <span className={`delta ${coverage === 100 ? "up" : "down"}`}>{stats.embedded_chunks}/{stats.chunks}</span>}
         </div>
       </div>
       {(stats.indexing > 0 || stats.index_issues > 0) && (

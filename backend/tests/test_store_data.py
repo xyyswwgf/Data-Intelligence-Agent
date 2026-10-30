@@ -42,12 +42,12 @@ def _ledger(month: int = 9, remark: str | None = None) -> bytes:
     target = [[f"测试店荣耀 {month}月 门店达成一览表"],
               [dt.datetime(2026, month, 28), "任 务", "总 毛 利", "X系列", "台数"],
               [30, "占比", 1, 0.5],
-              ["望京万象汇", "月度目标", 1000, 500],
+              ["城东万达", "月度目标", 1000, 500],
               [None, "截至到目前完成", 136, 164, 1],
               [None, "达成率", 0.136, 0.328],
               ["测试员", "月度目标", 500, 250, "台数"],
               [None, "截至到目前完成", 136, 164, 1]]
-    return _xlsx({"万象汇销售报表": rows, f"{month}月任务": target,
+    return _xlsx({"城东销售报表": rows, f"{month}月任务": target,
                   "进店价格": [["产品分类", None, "零售价", "进店价", "毛利"], ["手机", "荣耀X80 Pro Max 8+256", 2099, 1935, 164]]})
 
 
@@ -76,32 +76,32 @@ SPREADSHEET_ML = """<?xml version="1.0" encoding="UTF-8"?>
 <Row><Cell><Data ss:Type="String">1</Data></Cell><Cell><Data ss:Type="String">2026-09-02 12:00:00</Data></Cell>
 <Cell><Data ss:Type="String">2026090200001</Data></Cell><Cell><Data ss:Type="String">在线支付</Data></Cell>
 <Cell><Data ss:Type="Number">88.5</Data></Cell><Cell><Data ss:Type="String">*三</Data></Cell>
-<Cell ss:Index="7"><Data ss:Type="String">荣耀授权体验店(南锣鼓巷店)</Data></Cell></Row>
+<Cell ss:Index="7"><Data ss:Type="String">连锁门店(老城步行街店)</Data></Cell></Row>
 <Row><Cell><Data ss:Type="String">#导出时间：2026-09-03</Data></Cell></Row>
 </Table></Worksheet></Workbook>""".encode()
 
 STOCK_AGE_TSV = ("行号\t仓库\t商品分类\t商品名称\t串号\t库存量\t品牌\t供应商\t成本单价\t入库单价\t入库日期\t库龄(天)\t型号\t\r\n"
-                 "1\t通州乐堤港库\t手机.荣耀\t荣耀Power2-12+512G\tSN001\t1\t荣耀\t样例\t2640.0000 \t2640.0000 \t"
+                 "1\t滨河仓\t手机.荣耀\t荣耀Power2-12+512G\tSN001\t1\t荣耀\t样例\t2640.0000 \t2640.0000 \t"
                  "2026/1/15 12:01:31\t200\tPower2\t\r\n"
                  "\t\t\t\t\t1 \t\t\t2,640.0000 \t2,640.0000 \t\r\n").encode("gb18030")
 
 
 def test_read_workbook_formats():
-    assert list(read_workbook(_broken_styles(_ledger()))) == ["万象汇销售报表", "9月任务", "进店价格"]
-    broken = read_workbook(_broken_styles(_ledger()))["万象汇销售报表"]
+    assert list(read_workbook(_broken_styles(_ledger()))) == ["城东销售报表", "9月任务", "进店价格"]
+    broken = read_workbook(_broken_styles(_ledger()))["城东销售报表"]
     assert broken[1][0] == dt.datetime(2026, 9, 1) and broken[1][8] == 2099  # 日期格式从样式表中识别
 
     sheet = read_workbook(SPREADSHEET_ML)["账务组合查询1"]
-    assert sheet[2][4] == 88.5 and sheet[2][6] == "荣耀授权体验店(南锣鼓巷店)"  # ss:Index 跳过的列补空
+    assert sheet[2][4] == 88.5 and sheet[2][6] == "连锁门店(老城步行街店)"  # ss:Index 跳过的列补空
 
     rows = read_workbook(STOCK_AGE_TSV)["Sheet1"]
-    assert rows[0][1] == "仓库" and rows[1][1] == "通州乐堤港库"
+    assert rows[0][1] == "仓库" and rows[1][1] == "滨河仓"
 
 
 def test_parsers_recognise_files(tmp_path):
     from backend.store_data.parsers import parse_file
 
-    ledger = tmp_path / "万象汇销量报表.xlsx"
+    ledger = tmp_path / "城东销量报表.xlsx"
     ledger.write_bytes(_broken_styles(_ledger()))
     parsed = parse_file(ledger)
     sales = parsed.records["fact_store_sales"]
@@ -110,9 +110,9 @@ def test_parsers_recognise_files(tmp_path):
     assert sales[0]["gross_profit"] == 164 and sales[0]["is_phone"] and sales[0]["month_label"] == "2026-09"
     assert sales[1]["salesperson"] == "测试员" and sales[1]["sale_date"] == dt.date(2026, 9, 1)  # 沿用上一行
     targets = {(r["owner"], r["item"], r["unit"]): r for r in parsed.records["fact_store_targets"]}
-    assert targets[("望京万象汇", "总毛利", "毛利")]["target_value"] == 1000
+    assert targets[("城东万达", "总毛利", "毛利")]["target_value"] == 1000
     assert targets[("测试员", "X系列", "台数")]["achieved_value"] == 1
-    assert targets[("望京万象汇", "总毛利", "毛利")]["month_label"] == "2026-09"
+    assert targets[("城东万达", "总毛利", "毛利")]["month_label"] == "2026-09"
 
     alipay = tmp_path / "支付宝收款明细.xls"
     alipay.write_bytes(SPREADSHEET_ML)
@@ -134,15 +134,15 @@ def test_loader_and_knowledge(tmp_path, client):
     from backend.store_data.loader import load
     from backend.store_data.sample import load_sample
 
-    (tmp_path / "万象汇销量报表.xlsx").write_bytes(_ledger())
+    (tmp_path / "城东销量报表.xlsx").write_bytes(_ledger())
     (tmp_path / "支付宝收款明细.xls").write_bytes(SPREADSHEET_ML)
     (tmp_path / "特玩2026年9月门店指导书.xlsx").write_bytes(_xlsx({
         "产品政策": [[None, "产品名称", "配置", "进店毛利", "进店价", "常规指导价", "指导价提成", "SO激励", "活动促销价", "促销价提成", "备注"],
                  [None, "Magic V6", "12+512", None, 9200, 9999, 80, None, None, None, None],
                  [None, None, "16+512", None, 10120, 10999, 80, None, None, None, None]],
         "店长店员考核": [["店长考核：底薪+店提+红包"], ["店提点位", 0.06, 0.08, 0.09],
-                   ["南锣", "毛利≤60000元", "60000元≤毛利<80000元", "80000元≤毛利"],
-                   ["望京", "毛利≤40000元", "40000元≤毛利<60000元", "60000元≤毛利"]],
+                   ["老城", "毛利≤60000元", "60000元≤毛利<80000元", "80000元≤毛利"],
+                   ["城东", "毛利≤40000元", "40000元≤毛利<60000元", "60000元≤毛利"]],
     }))
     try:
         report = load([str(tmp_path)], reset=True)
@@ -153,13 +153,13 @@ def test_loader_and_knowledge(tmp_path, client):
             paid_store = conn.execute(text(
                 "SELECT d.short_name FROM fact_payments p JOIN dim_store d USING (store_id)")).scalar()
             pages = dict(conn.execute(text("SELECT slug, content_md FROM wiki_pages")).all())
-        assert store == "望京" and paid_store == "南锣"
+        assert store == "城东" and paid_store == "老城"
         assert {"home", "store-data-guide", "store-targets-2026-09", "store-guide-2026-09"} <= set(pages)
         policy = next(v for k, v in pages.items() if k.startswith("store-guide-2026-09-") and "Magic V6" in v)
         assert "### Magic V6" in policy and "| 16+512 | 10,120 |" in policy
         rules = next(v for k, v in pages.items() if k.startswith("store-guide-2026-09-") and "店提点位" in v)
         assert "| 店提点位 | 6% | 8% | 9% |" in rules  # 点位按百分比展示
-        assert "| 望京 | 毛利≤40000元 |" in rules  # 不规整的工作表逐行保留，不能把内容行当表头吞掉
+        assert "| 城东 | 毛利≤40000元 |" in rules  # 不规整的工作表逐行保留，不能把内容行当表头吞掉
         assert "测试员" in pages["store-data-guide"]
 
         again = load([str(tmp_path)])  # 重复导入不产生重复数据和页面
@@ -208,8 +208,8 @@ def test_monthly_import_keeps_earlier_months(tmp_path, client):
     sept.mkdir()
     octo.mkdir()
     # 收银系统每月导出的文件名相同
-    (sept / "万象汇销量报表.xlsx").write_bytes(_ledger(9))
-    (octo / "万象汇销量报表.xlsx").write_bytes(_ledger(10, remark="顾客张三丰13800138000"))
+    (sept / "城东销量报表.xlsx").write_bytes(_ledger(9))
+    (octo / "城东销量报表.xlsx").write_bytes(_ledger(10, remark="顾客张三丰13800138000"))
     try:
         load([str(sept)], reset=True, update_kb=False)
         load([str(octo)], update_kb=False)
@@ -233,7 +233,7 @@ def test_store_data_import_api(client, admin_headers, make_user):
     from backend.store_data.sample import load_sample
     from backend.database import get_connection
 
-    files = [("files", ("万象汇销量报表.xlsx", _ledger(), "application/octet-stream")),
+    files = [("files", ("城东销量报表.xlsx", _ledger(), "application/octet-stream")),
              ("files", ("支付宝收款明细.xls", SPREADSHEET_ML, "application/octet-stream"))]
     viewer = make_user("viewer")
     assert client.post("/api/store-data/import", headers=viewer, files=files).status_code == 403

@@ -20,7 +20,7 @@ import functools
 import json
 import logging
 from dataclasses import dataclass, field
-from typing import Any
+from typing import Any, Iterator
 
 import httpx
 
@@ -98,6 +98,21 @@ def _metered(chat):
     return wrapper
 
 
+def _metered_stream(stream_chat):
+    """包装流式调用：生成器结束时拿到完整的 LLMResponse，再交给计费模块。"""
+
+    @functools.wraps(stream_chat)
+    def wrapper(self, *args, **kwargs):
+        response = yield from stream_chat(self, *args, **kwargs)
+        from backend.billing.metering import record
+
+        record(self, response)
+        return response
+
+    wrapper.__metered__ = True
+    return wrapper
+
+
 class Provider:
     name = "base"
     model = ""
@@ -111,6 +126,9 @@ class Provider:
         chat = cls.__dict__.get("chat")
         if chat is not None and not getattr(chat, "__metered__", False):
             cls.chat = _metered(chat)
+        stream = cls.__dict__.get("stream_chat")
+        if stream is not None and not getattr(stream, "__metered__", False):
+            cls.stream_chat = _metered_stream(stream)
 
     def configured(self) -> bool:
         raise NotImplementedError
@@ -125,6 +143,27 @@ class Provider:
         thinking: bool = False,
     ) -> LLMResponse:
         raise NotImplementedError
+
+    def stream_chat(
+        self,
+        system: str,
+        messages: list[dict],
+        tools: list[ToolSpec] | None = None,
+        max_tokens: int | None = None,
+        temperature: float = 0.2,
+        thinking: bool = False,
+    ) -> Iterator[tuple[str, str]]:
+        """
+        流式调用：逐段产出 ("text" | "reasoning", 增量文本)，生成器的返回值是完整的 LLMResponse
+        （用法：resp = yield from provider.stream_chat(...)）。
+        不支持流式的 Provider 退化为一次 chat，整段产出。
+        """
+        resp = self.chat(system, messages, tools=tools, max_tokens=max_tokens, temperature=temperature, thinking=thinking)
+        if resp.reasoning:
+            yield "reasoning", resp.reasoning
+        if resp.text:
+            yield "text", resp.text
+        return resp
 
     def complete(self, system: str, user: str, max_tokens: int = 1500, temperature: float = 0.2) -> str:
         """单轮文本补全的便捷方法。"""
@@ -186,7 +225,7 @@ class AnthropicProvider(Provider):
                     out.append({"role": "user", "content": [block]})
         return out
 
-    def chat(self, system, messages, tools=None, max_tokens=None, temperature=0.2, thinking=False):
+    def _kwargs(self, system, messages, tools, max_tokens, temperature, thinking) -> dict[str, Any]:
         if not self.configured():
             raise LLMError("未配置大模型 API Key")
         max_tokens = max_tokens or self.settings.max_output_tokens
@@ -204,11 +243,10 @@ class AnthropicProvider(Provider):
         else:
             kwargs["thinking"] = {"type": "disabled"}
             kwargs["temperature"] = temperature
-        try:
-            response = self._get_client().messages.create(**kwargs)
-        except Exception as exc:
-            raise LLMError(f"大模型 API 调用失败: {exc}") from exc
+        return kwargs
 
+    @staticmethod
+    def _parse(response) -> LLMResponse:
         result = LLMResponse(stop_reason=response.stop_reason or "")
         blocks = []
         for block in response.content:
@@ -228,6 +266,33 @@ class AnthropicProvider(Provider):
         if result.reasoning and result.tool_calls:
             result.provider_blocks = blocks
         return result
+
+    def chat(self, system, messages, tools=None, max_tokens=None, temperature=0.2, thinking=False):
+        kwargs = self._kwargs(system, messages, tools, max_tokens, temperature, thinking)
+        try:
+            response = self._get_client().messages.create(**kwargs)
+        except Exception as exc:
+            raise LLMError(f"大模型 API 调用失败: {exc}") from exc
+        return self._parse(response)
+
+    def stream_chat(self, system, messages, tools=None, max_tokens=None, temperature=0.2, thinking=False):
+        kwargs = self._kwargs(system, messages, tools, max_tokens, temperature, thinking)
+        try:
+            with self._get_client().messages.stream(**kwargs) as stream:
+                for event in stream:
+                    if getattr(event, "type", "") != "content_block_delta":
+                        continue
+                    delta = event.delta
+                    if delta.type == "text_delta" and delta.text:
+                        yield "text", delta.text
+                    elif delta.type == "thinking_delta" and getattr(delta, "thinking", ""):
+                        yield "reasoning", delta.thinking
+                final = stream.get_final_message()
+        except LLMError:
+            raise
+        except Exception as exc:
+            raise LLMError(f"大模型 API 调用失败: {exc}") from exc
+        return self._parse(final)
 
 
 # ---------------------------------------------------------------------------
@@ -265,14 +330,13 @@ class OpenAICompatibleProvider(Provider):
                 out.append({"role": msg["role"], "content": msg["content"]})
         return out
 
-    def chat(self, system, messages, tools=None, max_tokens=None, temperature=0.2, thinking=False):
+    def _body(self, system, messages, tools, max_tokens, temperature, thinking) -> dict[str, Any]:
         if not self.configured():
             raise LLMError("未配置大模型接口地址 LLM_BASE_URL")
-        max_tokens = max_tokens or self.settings.max_output_tokens
         body: dict[str, Any] = {
             "model": self.model,
             "messages": self._convert(system, messages),
-            "max_tokens": max_tokens,
+            "max_tokens": max_tokens or self.settings.max_output_tokens,
             "temperature": temperature,
             "stream": False,
         }
@@ -285,12 +349,32 @@ class OpenAICompatibleProvider(Provider):
             body["reasoning_effort"] = self.settings.reasoning_effort
         elif not thinking and self.settings.no_reasoning_effort:
             body["reasoning_effort"] = self.settings.no_reasoning_effort
+        return body
+
+    def _headers(self) -> dict[str, str]:
         headers = {"Content-Type": "application/json"}
         if self.api_key:
             headers["Authorization"] = f"Bearer {self.api_key}"
+        return headers
+
+    @staticmethod
+    def _tool_calls(raw_calls: list[dict]) -> list[ToolCall]:
+        calls = []
+        for i, call in enumerate(raw_calls):
+            fn = call.get("function") or {}
+            raw_args = fn.get("arguments") or "{}"
+            try:
+                args = json.loads(raw_args) if isinstance(raw_args, str) else dict(raw_args)
+            except json.JSONDecodeError:
+                args = {"_raw": raw_args}
+            calls.append(ToolCall(call.get("id") or f"call_{i}", fn.get("name", ""), args))
+        return calls
+
+    def chat(self, system, messages, tools=None, max_tokens=None, temperature=0.2, thinking=False):
+        body = self._body(system, messages, tools, max_tokens, temperature, thinking)
         try:
             with httpx.Client(timeout=self.settings.timeout_seconds) as client:
-                resp = client.post(f"{self.base_url}/chat/completions", headers=headers, json=body)
+                resp = client.post(f"{self.base_url}/chat/completions", headers=self._headers(), json=body)
         except Exception as exc:
             raise LLMError(f"大模型 API 调用失败: {exc}") from exc
         if resp.status_code >= 400:
@@ -303,18 +387,66 @@ class OpenAICompatibleProvider(Provider):
             # DeepSeek 用 reasoning_content，Ollama / 部分 vLLM 用 reasoning
             reasoning=message.get("reasoning_content") or message.get("reasoning") or "",
             stop_reason=choice.get("finish_reason") or "",
+            tool_calls=self._tool_calls(message.get("tool_calls") or []),
         )
-        for i, call in enumerate(message.get("tool_calls") or []):
-            fn = call.get("function") or {}
-            raw_args = fn.get("arguments") or "{}"
-            try:
-                args = json.loads(raw_args) if isinstance(raw_args, str) else dict(raw_args)
-            except json.JSONDecodeError:
-                args = {"_raw": raw_args}
-            result.tool_calls.append(ToolCall(call.get("id") or f"call_{i}", fn.get("name", ""), args))
         usage = data.get("usage") or {}
         result.input_tokens = usage.get("prompt_tokens", 0) or 0
         result.output_tokens = usage.get("completion_tokens", 0) or 0
+        return result
+
+    def stream_chat(self, system, messages, tools=None, max_tokens=None, temperature=0.2, thinking=False):
+        body = self._body(system, messages, tools, max_tokens, temperature, thinking)
+        body["stream"] = True
+        body["stream_options"] = {"include_usage": True}  # 最后一个分片带 token 用量（计费用）
+        result = LLMResponse()
+        calls: dict[int, dict] = {}  # 工具调用按 index 分片到达，参数是逐段拼接的字符串
+        try:
+            with httpx.Client(timeout=self.settings.timeout_seconds) as client:
+                resp = client.send(client.build_request("POST", f"{self.base_url}/chat/completions",
+                                                        headers=self._headers(), json=body), stream=True)
+                if resp.status_code == 400 and "stream_options" in body:
+                    # 部分推理服务不认识 stream_options：去掉后重试（这时拿不到用量，按 0 计）
+                    resp.close()
+                    body.pop("stream_options")
+                    resp = client.send(client.build_request("POST", f"{self.base_url}/chat/completions",
+                                                            headers=self._headers(), json=body), stream=True)
+                try:
+                    if resp.status_code >= 400:
+                        raise LLMError(f"大模型 API 返回 {resp.status_code}: {resp.read().decode(errors='replace')[:300]}")
+                    for line in resp.iter_lines():
+                        if not line.startswith("data:"):
+                            continue
+                        payload = line[5:].strip()
+                        if not payload or payload == "[DONE]":
+                            continue
+                        chunk = json.loads(payload)
+                        if chunk.get("usage"):
+                            result.input_tokens = chunk["usage"].get("prompt_tokens", 0) or 0
+                            result.output_tokens = chunk["usage"].get("completion_tokens", 0) or 0
+                        for choice in chunk.get("choices") or []:
+                            delta = choice.get("delta") or {}
+                            reasoning = delta.get("reasoning_content") or delta.get("reasoning")
+                            if reasoning:
+                                result.reasoning += reasoning
+                                yield "reasoning", reasoning
+                            if delta.get("content"):
+                                result.text += delta["content"]
+                                yield "text", delta["content"]
+                            for part in delta.get("tool_calls") or []:
+                                slot = calls.setdefault(part.get("index", len(calls)), {"id": None, "function": {"name": "", "arguments": ""}})
+                                slot["id"] = part.get("id") or slot["id"]
+                                fn = part.get("function") or {}
+                                slot["function"]["name"] += fn.get("name") or ""
+                                slot["function"]["arguments"] += fn.get("arguments") or ""
+                            if choice.get("finish_reason"):
+                                result.stop_reason = choice["finish_reason"]
+                finally:
+                    resp.close()
+        except LLMError:
+            raise
+        except Exception as exc:
+            raise LLMError(f"大模型 API 调用失败: {exc}") from exc
+        result.tool_calls = self._tool_calls([calls[k] for k in sorted(calls)])
         return result
 
 

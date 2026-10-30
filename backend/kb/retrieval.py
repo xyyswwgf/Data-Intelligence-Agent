@@ -99,10 +99,15 @@ def make_snippet(content: str, terms: list[str], width: int = 160) -> str:
     return ("…" if start > 0 else "") + snippet + ("…" if start + width < len(flat) else "")
 
 
-def _keyword_search(terms: list[str], limit: int) -> list[Hit]:
+def _space_filter(spaces: list[int] | None) -> str:
+    """检索范围：spaces 为 None 时不限制（系统内部），否则只检索这些知识空间。"""
+    return "" if spaces is None else " AND p.space_id = ANY(:spaces)"
+
+
+def _keyword_search(terms: list[str], limit: int, spaces: list[int] | None = None) -> list[Hit]:
     if not terms:
         return []
-    params: dict = {"limit": limit}
+    params: dict = {"limit": limit, "spaces": spaces}
     content_hits, title_hits = [], []
     for i, term in enumerate(terms):
         params[f"t{i}"] = f"%{term}%"
@@ -112,7 +117,7 @@ def _keyword_search(terms: list[str], limit: int) -> list[Hit]:
     any_hit = " OR ".join(f"c.content ILIKE :t{i} OR c.heading_path ILIKE :t{i} OR p.title ILIKE :t{i}" for i in range(len(terms)))
     sql = f"""
         SELECT c.id, c.page_id, p.slug, p.title, c.heading_path, c.content, {score} AS score
-        FROM kb_chunks c JOIN wiki_pages p ON p.id = c.page_id AND NOT p.is_deleted
+        FROM kb_chunks c JOIN wiki_pages p ON p.id = c.page_id AND NOT p.is_deleted{_space_filter(spaces)}
         WHERE {any_hit}
         ORDER BY score DESC, c.char_count ASC
         LIMIT :limit
@@ -127,35 +132,35 @@ def _keyword_search(terms: list[str], limit: int) -> list[Hit]:
     ]
 
 
-def _vector_search(query: str, limit: int) -> list[Hit]:
+def _vector_search(query: str, limit: int, spaces: list[int] | None = None) -> list[Hit]:
     vec = embeddings.embed([query])[0]
     with get_connection() as conn:
-        rows = conn.execute(text("""
+        rows = conn.execute(text(f"""
             SELECT c.id, c.page_id, p.slug, p.title, c.heading_path, c.content,
                    1 - (c.embedding <=> CAST(:v AS vector)) AS similarity
-            FROM kb_chunks c JOIN wiki_pages p ON p.id = c.page_id AND NOT p.is_deleted
+            FROM kb_chunks c JOIN wiki_pages p ON p.id = c.page_id AND NOT p.is_deleted{_space_filter(spaces)}
             WHERE c.embedding IS NOT NULL
             ORDER BY c.embedding <=> CAST(:v AS vector)
             LIMIT :limit
-        """), {"v": embeddings.to_pgvector(vec), "limit": limit}).all()
+        """), {"v": embeddings.to_pgvector(vec), "limit": limit, "spaces": spaces}).all()
     if not rows:
         return []
     floor = max(RAG_MIN_SIMILARITY, float(rows[0][6]) - RAG_RELATIVE_SIMILARITY)
     return [Hit(r[0], r[1], r[2], r[3], r[4], r[5], vector_score=float(r[6])) for r in rows if float(r[6]) >= floor]
 
 
-def search(query: str, top_k: int = 6) -> dict:
+def search(query: str, top_k: int = 6, spaces: list[int] | None = None) -> dict:
     """返回 {mode, hits}，mode 为 hybrid / keyword，便于前端提示检索方式。"""
     query = query.strip()
     if not query:
         return {"mode": "keyword", "hits": []}
     terms = query_terms(query)
-    keyword_hits = _keyword_search(terms, _CANDIDATES)
+    keyword_hits = _keyword_search(terms, _CANDIDATES, spaces)
     vector_hits: list[Hit] = []
     mode = "keyword"
     if embeddings.available():
         try:
-            vector_hits = _vector_search(query, _CANDIDATES)
+            vector_hits = _vector_search(query, _CANDIDATES, spaces)
             mode = "hybrid"
         except embeddings.EmbeddingError as exc:
             logger.warning("向量检索不可用，降级为关键词检索: %s", exc)
@@ -188,9 +193,9 @@ def search(query: str, top_k: int = 6) -> dict:
     return {"mode": mode, "hits": results}
 
 
-def search_pages(query: str, limit: int = 20) -> dict:
+def search_pages(query: str, limit: int = 20, spaces: list[int] | None = None) -> dict:
     """Wiki 搜索：按页面聚合，并补充标题直接匹配的页面。"""
-    result = search(query, top_k=limit * 2)
+    result = search(query, top_k=limit * 2, spaces=spaces)
     pages: dict[int, dict] = {}
     for hit in result["hits"]:
         page = pages.setdefault(hit.page_id, {"slug": hit.slug, "title": hit.title, "score": 0.0, "sections": []})
@@ -198,11 +203,11 @@ def search_pages(query: str, limit: int = 20) -> dict:
         if len(page["sections"]) < 2:
             page["sections"].append({"heading_path": hit.heading_path, "snippet": make_snippet(hit.content, hit.matched_terms)})
     with get_connection() as conn:
-        rows = conn.execute(text("""
-            SELECT id, slug, title, summary FROM wiki_pages
-            WHERE NOT is_deleted AND (title ILIKE :q OR slug ILIKE :q OR :raw = ANY(tags))
+        rows = conn.execute(text(f"""
+            SELECT id, slug, title, summary FROM wiki_pages p
+            WHERE NOT is_deleted AND (title ILIKE :q OR slug ILIKE :q OR :raw = ANY(tags)){_space_filter(spaces)}
             LIMIT 10
-        """), {"q": f"%{query.strip()}%", "raw": query.strip()}).all()
+        """), {"q": f"%{query.strip()}%", "raw": query.strip(), "spaces": spaces}).all()
     for r in rows:
         page = pages.setdefault(r[0], {"slug": r[1], "title": r[2], "score": 0.0, "sections": []})
         page["score"] += 1.0  # 标题精确命中排最前

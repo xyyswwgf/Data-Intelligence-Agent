@@ -3,7 +3,7 @@
 
   planner → knowledge → sql → executor → analysis → attribution → visualization → report
 
-分析对象是荣耀授权体验店的销售台账（fact_store_sales）、月度任务（fact_store_targets）和库龄表（fact_stock_age）：
+分析对象是门店的销售台账（fact_store_sales）、月度任务（fact_store_targets）和库龄表（fact_stock_age）：
   - 门店：销售额、毛利、毛利率、手机台数，对照毛利目标计算达成率；月中按已过天数预估月底达成
   - 结构：产品线（类型）、店员、收款方式，定位贡献最大和差距最大的部分
   - 库存：长库龄（> 90 天）商品的数量和金额
@@ -58,6 +58,7 @@ _FOCUS_KEYWORDS = {
 
 
 class AgentState(TypedDict, total=False):
+    user_id: int | None
     question: str
     analysis_mode: str
     run_id: str
@@ -80,6 +81,7 @@ _COMPILED_GRAPH = None
 
 def run_analysis(question: str, analysis_mode: str = "auto", user_id: int | None = None) -> dict[str, Any]:
     state: AgentState = {
+        "user_id": user_id,
         "question": question.strip(),
         "analysis_mode": analysis_mode,
         "run_id": str(uuid.uuid4()),
@@ -203,7 +205,12 @@ def knowledge_node(state: AgentState) -> AgentState:
         try:
             from backend.kb.rag import knowledge_for_agent
 
-            state["knowledge"] = knowledge_for_agent(state["question"])
+            spaces = None
+            if state.get("user_id"):
+                from backend.kb.spaces import readable_spaces
+
+                spaces = readable_spaces(state["user_id"])
+            state["knowledge"] = knowledge_for_agent(state["question"], spaces=spaces)
         except Exception as exc:
             logger.warning("企业知识库检索失败: %s", exc)
             state["knowledge"] = []

@@ -29,7 +29,7 @@ logger = logging.getLogger("nl2sql.store_data")
 
 SUPPORTED_SUFFIXES = {".xlsx", ".xlsm", ".xls"}
 # 新数据替换旧数据的范围：旧数据中与本次导入同一范围的行先删除，其余保留。
-# 例如导入 9 月的万象汇台账只替换望京 9 月的销售，8 月和其他门店不受影响。
+# 例如导入 9 月的城东门店台账只替换城东 9 月的销售，8 月和其他门店不受影响。
 REPLACE_SCOPES: dict[str, tuple[str, ...]] = {
     "fact_store_sales": ("store_id", "month_label"),
     "fact_store_targets": ("store_id", "month_label"),
