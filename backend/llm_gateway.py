@@ -17,6 +17,7 @@ LLM 网关 — 屏蔽不同大模型 API 协议的差异，供 NL2SQL、RAG、�
 from __future__ import annotations
 
 import functools
+import inspect
 import json
 import logging
 from dataclasses import dataclass, field
@@ -113,6 +114,14 @@ def _metered_stream(stream_chat):
     return wrapper
 
 
+def _accepts(fn, param: str) -> bool:
+    try:
+        params = inspect.signature(fn).parameters
+    except (TypeError, ValueError):
+        return False
+    return param in params or any(p.kind is inspect.Parameter.VAR_KEYWORD for p in params.values())
+
+
 class Provider:
     name = "base"
     model = ""
@@ -141,7 +150,9 @@ class Provider:
         max_tokens: int | None = None,
         temperature: float = 0.2,
         thinking: bool = False,
+        tool_choice: str | None = None,
     ) -> LLMResponse:
+        """tool_choice：None = 模型自行决定；"none" = 带着工具定义但禁止调用（用于强制作答的最后一轮）。"""
         raise NotImplementedError
 
     def stream_chat(
@@ -152,13 +163,17 @@ class Provider:
         max_tokens: int | None = None,
         temperature: float = 0.2,
         thinking: bool = False,
+        tool_choice: str | None = None,
     ) -> Iterator[tuple[str, str]]:
         """
         流式调用：逐段产出 ("text" | "reasoning", 增量文本)，生成器的返回值是完整的 LLMResponse
         （用法：resp = yield from provider.stream_chat(...)）。
         不支持流式的 Provider 退化为一次 chat，整段产出。
         """
-        resp = self.chat(system, messages, tools=tools, max_tokens=max_tokens, temperature=temperature, thinking=thinking)
+        # 自定义 Provider 的 chat 可能不认识 tool_choice：不支持时不传（agent 会忽略最后一轮的工具调用）
+        extra = {"tool_choice": tool_choice} if tool_choice and _accepts(self.chat, "tool_choice") else {}
+        resp = self.chat(system, messages, tools=tools, max_tokens=max_tokens, temperature=temperature,
+                         thinking=thinking, **extra)
         if resp.reasoning:
             yield "reasoning", resp.reasoning
         if resp.text:
@@ -225,7 +240,7 @@ class AnthropicProvider(Provider):
                     out.append({"role": "user", "content": [block]})
         return out
 
-    def _kwargs(self, system, messages, tools, max_tokens, temperature, thinking) -> dict[str, Any]:
+    def _kwargs(self, system, messages, tools, max_tokens, temperature, thinking, tool_choice=None) -> dict[str, Any]:
         if not self.configured():
             raise LLMError("未配置大模型 API Key")
         max_tokens = max_tokens or self.settings.max_output_tokens
@@ -237,6 +252,8 @@ class AnthropicProvider(Provider):
         }
         if tools:
             kwargs["tools"] = [{"name": t.name, "description": t.description, "input_schema": t.parameters} for t in tools]
+            if tool_choice:
+                kwargs["tool_choice"] = {"type": tool_choice}
         if thinking and self.settings.thinking_budget > 0:
             kwargs["thinking"] = {"type": "enabled", "budget_tokens": self.settings.thinking_budget}
             kwargs["max_tokens"] = max_tokens + self.settings.thinking_budget
@@ -249,9 +266,13 @@ class AnthropicProvider(Provider):
     def _parse(response) -> LLMResponse:
         result = LLMResponse(stop_reason=response.stop_reason or "")
         blocks = []
+        has_thinking = False
         for block in response.content:
             btype = getattr(block, "type", "")
-            dumped = block.model_dump() if hasattr(block, "model_dump") else None
+            # 回传给 API 的块去掉值为 None 的字段（如 text 块的 citations=None），避免被新版接口拒绝
+            dumped = ({k: v for k, v in block.model_dump().items() if v is not None}
+                      if hasattr(block, "model_dump") else None)
+            has_thinking = has_thinking or btype in {"thinking", "redacted_thinking"}
             if btype == "text":
                 result.text += block.text
             elif btype == "thinking":
@@ -263,20 +284,22 @@ class AnthropicProvider(Provider):
         usage = getattr(response, "usage", None)
         result.input_tokens = getattr(usage, "input_tokens", 0) or 0
         result.output_tokens = getattr(usage, "output_tokens", 0) or 0
-        if result.reasoning and result.tool_calls:
+        # 开启 thinking 且调用了工具：下一轮必须原样回传 thinking / redacted_thinking 块（含签名）
+        if has_thinking and result.tool_calls:
             result.provider_blocks = blocks
         return result
 
-    def chat(self, system, messages, tools=None, max_tokens=None, temperature=0.2, thinking=False):
-        kwargs = self._kwargs(system, messages, tools, max_tokens, temperature, thinking)
+    def chat(self, system, messages, tools=None, max_tokens=None, temperature=0.2, thinking=False, tool_choice=None):
+        kwargs = self._kwargs(system, messages, tools, max_tokens, temperature, thinking, tool_choice)
         try:
             response = self._get_client().messages.create(**kwargs)
         except Exception as exc:
             raise LLMError(f"大模型 API 调用失败: {exc}") from exc
         return self._parse(response)
 
-    def stream_chat(self, system, messages, tools=None, max_tokens=None, temperature=0.2, thinking=False):
-        kwargs = self._kwargs(system, messages, tools, max_tokens, temperature, thinking)
+    def stream_chat(self, system, messages, tools=None, max_tokens=None, temperature=0.2, thinking=False,
+                    tool_choice=None):
+        kwargs = self._kwargs(system, messages, tools, max_tokens, temperature, thinking, tool_choice)
         try:
             with self._get_client().messages.stream(**kwargs) as stream:
                 for event in stream:
@@ -330,7 +353,7 @@ class OpenAICompatibleProvider(Provider):
                 out.append({"role": msg["role"], "content": msg["content"]})
         return out
 
-    def _body(self, system, messages, tools, max_tokens, temperature, thinking) -> dict[str, Any]:
+    def _body(self, system, messages, tools, max_tokens, temperature, thinking, tool_choice=None) -> dict[str, Any]:
         if not self.configured():
             raise LLMError("未配置大模型接口地址 LLM_BASE_URL")
         body: dict[str, Any] = {
@@ -345,6 +368,8 @@ class OpenAICompatibleProvider(Provider):
                 {"type": "function", "function": {"name": t.name, "description": t.description, "parameters": t.parameters}}
                 for t in tools
             ]
+            if tool_choice:
+                body["tool_choice"] = tool_choice
         if thinking and self.settings.reasoning_effort:
             body["reasoning_effort"] = self.settings.reasoning_effort
         elif not thinking and self.settings.no_reasoning_effort:
@@ -370,8 +395,8 @@ class OpenAICompatibleProvider(Provider):
             calls.append(ToolCall(call.get("id") or f"call_{i}", fn.get("name", ""), args))
         return calls
 
-    def chat(self, system, messages, tools=None, max_tokens=None, temperature=0.2, thinking=False):
-        body = self._body(system, messages, tools, max_tokens, temperature, thinking)
+    def chat(self, system, messages, tools=None, max_tokens=None, temperature=0.2, thinking=False, tool_choice=None):
+        body = self._body(system, messages, tools, max_tokens, temperature, thinking, tool_choice)
         try:
             with httpx.Client(timeout=self.settings.timeout_seconds) as client:
                 resp = client.post(f"{self.base_url}/chat/completions", headers=self._headers(), json=body)
@@ -394,8 +419,9 @@ class OpenAICompatibleProvider(Provider):
         result.output_tokens = usage.get("completion_tokens", 0) or 0
         return result
 
-    def stream_chat(self, system, messages, tools=None, max_tokens=None, temperature=0.2, thinking=False):
-        body = self._body(system, messages, tools, max_tokens, temperature, thinking)
+    def stream_chat(self, system, messages, tools=None, max_tokens=None, temperature=0.2, thinking=False,
+                    tool_choice=None):
+        body = self._body(system, messages, tools, max_tokens, temperature, thinking, tool_choice)
         body["stream"] = True
         body["stream_options"] = {"include_usage": True}  # 最后一个分片带 token 用量（计费用）
         result = LLMResponse()
@@ -487,7 +513,8 @@ def _from_profile(row: dict) -> Provider:
     )
     p = build_provider(row["provider"], row["base_url"], decrypt(row["api_key_encrypted"]), row["model"], settings)
     p.profile_id, p.profile_name, p.kind = row["id"], row["name"], row["kind"]
-    _cache.clear()  # 配置更新后旧实例失效
+    for stale in [k for k in _cache if k[0] == row["id"]]:  # 同一配置更新后旧实例失效，其他配置的实例保留
+        del _cache[stale]
     _cache[key] = p
     return p
 

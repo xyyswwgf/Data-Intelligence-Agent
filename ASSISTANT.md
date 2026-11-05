@@ -24,9 +24,11 @@ DeepSeek 开源的 DeepInfer 是 **GPU 推理服务引擎**（与 vLLM 同类：
 | 统一 LLM 网关 | `llm_gateway.py`：Anthropic / OpenAI 两种协议，原生推理内容统一解析为 `reasoning` |
 | 工具 | 检索知识库、列出数据表、读取表结构、执行只读 SQL、Python 分析（沙箱）、门店经营分析、CSV 表分析、写入记忆 |
 | 自我修正 | 工具报错（SQL 列名写错等）原文回传给模型，由模型修正后重试；重复调用直接跳过 |
-| 步数上限 | 达到上限后最后一轮不再提供工具，强制基于已有证据作答并说明缺口 |
+| 步数上限 | 达到上限后最后一轮仍带工具定义但设 `tool_choice=none`（历史里有工具调用时 Anthropic 协议要求必须带工具定义），强制基于已有证据作答并说明缺口；不支持 `tool_choice` 的推理服务若仍要调用工具，直接用模型已写出的文字作答 |
+| 后台执行 | `runs.py`：每轮对话在后台线程跑完，SSE 连接只是旁听。刷新页面、网络断开不会打断这一轮：回答照样落库、token 照样计费，刷新后前端轮询直到回答出现。同一会话同时只允许一轮（并发提问返回 409） |
+| 停止生成 | 输入框的发送按钮在回答过程中变成「停止」→ `POST /api/chat/sessions/{id}/stop`。Agent 在模型输出片段之间、工具调用之间检查，已生成的文字保存并标注「已停止生成」，被停止的回答不抽取记忆 |
 | 安全边界不变 | SQL 仍经过 sql_guard + 只读角色 + READ ONLY 事务；工具结果超长时截断再进上下文 |
-| 事件流 | SSE 实时推送 context / thinking / tool_call / tool_result / done，前端展示推理轨迹 |
+| 事件流 | SSE 实时推送 context / delta / thinking / tool_call / tool_result / stopped / done，前端展示推理轨迹 |
 | 无模型降级 | 未配置 LLM 时按规则路由到门店经营分析 / CSV 分析 / 知识检索，平台不中断 |
 
 ## 3. 记忆分层（借鉴 Letta / MemGPT 分层记忆、Mem0 自动抽取）

@@ -10,6 +10,8 @@
 
 from __future__ import annotations
 
+import contextvars
+
 import json
 import logging
 import re
@@ -254,4 +256,5 @@ def extract_in_background(user_id: int, session_id: str, question: str, answer: 
         except Exception:
             logger.exception("后台记忆抽取失败")
 
-    _executor.submit(job)
+    # 带上当前的计费上下文：后台抽取记忆消耗的 token 同样记到这位用户名下（中转计费不能漏）
+    _executor.submit(contextvars.copy_context().run, job)

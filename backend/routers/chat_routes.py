@@ -12,7 +12,7 @@ from pydantic import BaseModel, Field
 
 from backend import auth
 from backend.assistant import memory as memory_store
-from backend.assistant import sessions
+from backend.assistant import runs, sessions
 from backend.assistant.agent import run_turn
 from backend.auth import CurrentUser, get_current_user
 from backend.billing import accounts
@@ -87,7 +87,7 @@ def create_session(user: CurrentUser = Depends(get_current_user)):
 def get_session(session_id: str, user: CurrentUser = Depends(get_current_user)):
     session = _require_session(user, session_id)
     session.pop("user_id", None)
-    return {**session, "messages": sessions.get_messages(session_id)}
+    return {**session, "messages": sessions.get_messages(session_id), "running": runs.is_running(session_id)}
 
 
 @router.patch("/chat/sessions/{session_id}")
@@ -153,18 +153,35 @@ def send_message(session_id: str, req: SendMessage, user: CurrentUser = Depends(
         accounts.ensure_can_use(user.id, user.role)
     except accounts.QuotaExceeded as exc:
         raise HTTPException(status_code=402, detail=str(exc))
-    if req.mode == "assistant":
-        events = run_turn(_user_dict(user), session_id, req.content, req.table_name, req.model_profile_id, req.skill)
-    else:
-        events = _run_mode(user, session, req)
+    billing = BillingContext(user.id, session_id, req.mode)
+
+    def make_events(cancel):
+        if req.mode == "assistant":
+            events = run_turn(_user_dict(user), session_id, req.content, req.table_name, req.model_profile_id,
+                              req.skill, cancel=cancel)
+        else:
+            events = _run_mode(user, session, req)
+        # 本轮内所有大模型调用都记到当前用户名下（先扣方案额度，再扣余额）
+        return metered_events(events, billing)
+
+    # 后台执行：浏览器断开连接时这一轮照样跑完、落库、计费
+    try:
+        events = runs.start(session_id, make_events)
+    except runs.RunBusy as exc:
+        raise HTTPException(status_code=409, detail=str(exc))
     auth.audit("chat_message", user, "chat_session", session_id, {"mode": req.mode, "question": req.content[:200]})
-    # 本轮内所有大模型调用都记到当前用户名下（先扣方案额度，再扣余额）
-    events = metered_events(events, BillingContext(user.id, session_id, req.mode))
     return StreamingResponse(
         _sse(events),
         media_type="text/event-stream",
         headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no"},
     )
+
+
+@router.post("/chat/sessions/{session_id}/stop")
+def stop_message(session_id: str, user: CurrentUser = Depends(get_current_user)):
+    """停止生成：Agent 在下一个检查点收尾，已生成的部分会保存下来。"""
+    _require_session(user, session_id)
+    return {"stopping": runs.cancel(session_id)}
 
 
 @router.delete("/chat/sessions")
