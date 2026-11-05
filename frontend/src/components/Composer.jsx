@@ -21,7 +21,7 @@ function Picker({ icon, label, title, open, onToggle, children }) {
 }
 
 export default function Composer({
-  onSubmit, loading, mode, onModeChange, pack, targetTable, onClearTable, onOpenData, autoFocus,
+  onSubmit, onStop, loading, mode, onModeChange, pack, targetTable, onClearTable, onOpenData, autoFocus,
   models = [], modelId, onModelChange, skills = [], skill, onSkillChange,
 }) {
   // 第二个模式：选中导入表时是「表格分析」，否则是行业包的专属分析（通用包没有专属分析时隐藏）
@@ -184,9 +184,15 @@ export default function Composer({
               ))}
             </Picker>
           )}
-        <button type="button" className="send-btn" onClick={submit} disabled={loading || !value.trim()} aria-label="发送">
-          {loading ? <span className="send-spinner" /> : <Icon name="send" size={18} strokeWidth={2.2} />}
-        </button>
+        {loading && onStop ? (
+          <button type="button" className="send-btn is-stop" onClick={onStop} aria-label="停止生成" title="停止生成">
+            <span className="stop-square" />
+          </button>
+        ) : (
+          <button type="button" className="send-btn" onClick={submit} disabled={loading || !value.trim()} aria-label="发送">
+            {loading ? <span className="send-spinner" /> : <Icon name="send" size={18} strokeWidth={2.2} />}
+          </button>
+        )}
         </div>
       </div>
     </div>

@@ -16,6 +16,7 @@ from __future__ import annotations
 
 import logging
 import re
+import threading
 import time
 from datetime import date
 from typing import Any, Iterator
@@ -72,6 +73,7 @@ def run_turn(
     profile_id: int | None = None,
     skill: str | None = None,
     remember: bool = True,
+    cancel: threading.Event | None = None,
 ) -> Iterator[dict]:
     """
     执行一轮对话，逐步产出事件；最后一个事件是 done（含落库的消息）或 error。
@@ -79,6 +81,7 @@ def run_turn(
     profile_id：本轮使用的模型配置（为空时沿用会话上次的模型，再退回默认模型）
     skill：用户手动指定的技能，指引直接注入本轮上下文
     remember：为 False 时本轮不读写长期记忆（准确率评测用，避免把评测问答写进管理员的记忆）
+    cancel：用户点「停止」时被置位；Agent 在模型输出片段之间、工具调用之间检查，收尾并保存已生成的部分
     """
     session = sessions.get_session(user["id"], session_id)
     if not session:
@@ -111,7 +114,7 @@ def run_turn(
     started = time.perf_counter()
     try:
         if provider.configured():
-            gen = _react(provider, user, session, question, target_table, use_memory, trace, skill)
+            gen = _react(provider, user, session, question, target_table, use_memory, trace, skill, cancel)
             answer, citations, payload, usage = yield from gen
         elif explicit:
             answer, citations, payload, usage = f"好的，已经记住：{explicit}", [], None, {"steps": 0, "mode": "rule"}
@@ -132,8 +135,8 @@ def run_turn(
     yield _event("done", message_id=message["id"], seq=message["seq"], user_seq=user_msg["seq"],
                  content=answer, citations=citations, elapsed_ms=elapsed, usage=usage, model=model_info)
 
-    # 轮次结束后的「后台整理」：抽取长期记忆、按需压缩会话（不阻塞本轮响应）
-    if use_memory and not explicit and provider.configured():
+    # 轮次结束后的「后台整理」：抽取长期记忆、按需压缩会话（不阻塞本轮响应）；被停止的回答不抽取记忆
+    if use_memory and not explicit and provider.configured() and not usage.get("stopped"):
         memory_store.extract_in_background(user["id"], session_id, question, answer, provider)
     try:
         sessions.maybe_compact(session_id, provider)
@@ -141,7 +144,14 @@ def run_turn(
         logger.exception("会话压缩失败")
 
 
-def _react(provider, user, session, question, target_table, use_memory, trace, skill=None) -> Iterator[dict]:
+_STOPPED_NOTE = "（已停止生成）"
+
+
+def _react(provider, user, session, question, target_table, use_memory, trace, skill=None,
+           cancel: threading.Event | None = None) -> Iterator[dict]:
+    from backend.kb.spaces import readable_spaces
+
+    stopped = lambda: cancel is not None and cancel.is_set()  # noqa: E731
     off_skills = disabled_keys(user["id"], "skill")
     available_skills = [s for s in skill_store.list_skills(enabled_only=True) if s["name"] not in off_skills]
     registry = load_registry(user["role"], use_memory, bool(available_skills), disabled_keys(user["id"], "tool"))
@@ -170,27 +180,50 @@ def _react(provider, user, session, question, target_table, use_memory, trace, s
     usage = {"input_tokens": 0, "output_tokens": 0, "steps": 0, "context": report["used"], "window": report["window"]}
     seen_calls: set[str] = set()
 
+    def stop_answer(partial: str) -> tuple:
+        usage["stopped"] = True
+        ev = _event("stopped", step=usage["steps"])
+        trace.append(ev)
+        text_out = f"{partial.strip()}\n\n{_STOPPED_NOTE}" if partial.strip() else _STOPPED_NOTE
+        return text_out, _merge_citations(citations, text_out), payload, usage
+
     for step in range(1, AGENT_MAX_STEPS + 2):
         final_round = step > AGENT_MAX_STEPS
+        if stopped():
+            yield _event("stopped", step=step)
+            return stop_answer("")
+        partial = ""
         try:
-            # 流式调用：文字边生成边推给前端（delta 事件不落库）；这一步若转为调用工具，前端丢弃草稿
+            # 流式调用：文字边生成边推给前端（delta 事件不落库）；这一步若转为调用工具，前端丢弃草稿。
+            # 最后一轮仍然带上工具定义（历史里有工具调用时 Anthropic 协议要求必须带），用 tool_choice=none 禁止再调用
             stream = provider.stream_chat(
                 ctx.system, messages,
-                tools=None if final_round else specs,
+                tools=specs,
                 thinking=True,  # 是否真正开启由 Provider 按 LLM_THINKING_BUDGET / LLM_REASONING_EFFORT 决定
+                tool_choice="none" if final_round else None,
             )
+            resp = None
             while True:
                 try:
                     channel, piece = next(stream)
                 except StopIteration as stop:
                     resp = stop.value
                     break
+                if channel == "text":
+                    partial += piece
                 yield _event("delta", step=step, channel="answer" if channel == "text" else "reasoning", text=piece)
+                if stopped():
+                    stream.close()
+                    break
         except LLMError as exc:
             ev = _event("error", message=str(exc))
             trace.append(ev)
             yield ev
             return f"大模型调用失败：{exc}", citations, payload, usage
+        if resp is None:  # 生成到一半被停止
+            usage["steps"] = step
+            yield _event("stopped", step=step)
+            return stop_answer(partial)
         usage["input_tokens"] += resp.input_tokens
         usage["output_tokens"] += resp.output_tokens
         usage["steps"] = step
@@ -204,13 +237,19 @@ def _react(provider, user, session, question, target_table, use_memory, trace, s
             trace.append(ev)
             yield ev
 
-        if not resp.tool_calls:
-            answer = _verify_references(resp.text.strip() or "（模型没有给出回答）", citations)
+        # 最后一轮模型仍想调用工具（部分推理服务不支持 tool_choice=none）：不再执行，用它已经写出的文字作答
+        if not resp.tool_calls or final_round:
+            fallback = "（推理步数用尽，未能得出结论）" if resp.tool_calls else "（模型没有给出回答）"
+            answer = _verify_references(resp.text.strip() or fallback, citations, readable_spaces(user["id"]))
             return answer, _merge_citations(citations, answer), payload, usage
 
         messages.append({"role": "assistant", "content": resp.text, "tool_calls": resp.tool_calls,
                          "provider_blocks": resp.provider_blocks})
         for call in resp.tool_calls:
+            if stopped():
+                # 已经发起的工具调用必须有对应的结果，否则这段历史不合法；这里不再执行，只补一个占位结果
+                messages.append({"role": "tool", "tool_call_id": call.id, "name": call.name, "content": "用户已停止"})
+                continue
             key = f"{call.name}:{args_preview(call.arguments)}"
             ev = _event("tool_call", step=step, id=call.id, name=call.name, args=call.arguments)
             trace.append(ev)
@@ -248,8 +287,11 @@ def _slim_display(display: dict) -> dict:
     return slim
 
 
-def _verify_references(answer: str, citations: list[dict]) -> str:
-    """引用校验：只保留本轮检索到的页面或知识库中真实存在的页面，其余 [[...]] 降级为普通文本，防止编造来源。"""
+def _verify_references(answer: str, citations: list[dict], spaces: list[int] | None = None) -> str:
+    """
+    引用校验：只保留本轮检索到的页面或用户可读空间里真实存在的页面，其余 [[...]] 降级为普通文本，防止编造来源。
+    spaces 限定可读空间：别人个人空间里的页面即使存在也不算有效引用（用户点开也看不到）。
+    """
     refs = set(re.findall(r"\[\[([^\]|]+)(?:\|[^\]]*)?\]\]", answer))
     if not refs:
         return answer
@@ -257,9 +299,10 @@ def _verify_references(answer: str, citations: list[dict]) -> str:
     from backend.database import execute_sql
 
     retrieved = {c["slug"] for c in citations}
+    scope = "" if spaces is None else " AND space_id = ANY(:spaces)"
     existing = {row[0] for row in execute_sql(
-        "SELECT slug FROM wiki_pages WHERE NOT is_deleted AND slug = ANY(:s)",
-        {"s": [slugify(r) for r in refs]},
+        f"SELECT slug FROM wiki_pages WHERE NOT is_deleted AND slug = ANY(:s){scope}",
+        {"s": [slugify(r) for r in refs], "spaces": spaces},
     )["data"]}
     valid = retrieved | existing
 

@@ -480,6 +480,11 @@ export async function streamChatMessage(sessionId, payload, onEvent, signal) {
   }
 }
 
+/** 停止生成：后端在下一个检查点收尾，已生成的部分会保存。 */
+export async function stopChatMessage(sessionId) {
+  return (await apiClient.post(`/api/chat/sessions/${encodeURIComponent(sessionId)}/stop`)).data;
+}
+
 // ---------------------------------------------------------------------------
 // 记忆
 // ---------------------------------------------------------------------------

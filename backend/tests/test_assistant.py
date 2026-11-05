@@ -24,8 +24,9 @@ class ScriptedProvider(Provider):
     def configured(self):
         return True
 
-    def chat(self, system, messages, tools=None, max_tokens=1000, temperature=0.2, thinking=False):
-        self.calls.append({"system": system, "messages": list(messages), "tools": [t.name for t in tools or []]})
+    def chat(self, system, messages, tools=None, max_tokens=1000, temperature=0.2, thinking=False, tool_choice=None):
+        self.calls.append({"system": system, "messages": list(messages), "tools": [t.name for t in tools or []],
+                           "tool_choice": tool_choice})
         if not self.replies:
             return LLMResponse(text="[]")  # 后台记忆抽取等额外调用
         reply = self.replies.pop(0)
@@ -102,8 +103,90 @@ def test_step_limit_forces_final_answer(user, monkeypatch):
     _, events = _run(user, "随便查查")
     summaries = [r["summary"] for r in _of(events, "tool_result")]
     assert summaries[1] == "重复调用已跳过"
-    assert provider.calls[-1]["tools"] == []  # 最后一轮不再提供工具，强制作答
+    final = provider.calls[2]
+    # 最后一轮仍带工具定义（历史里有工具调用时 Anthropic 要求必须带），但用 tool_choice=none 禁止调用
+    assert final["tools"] and final["tool_choice"] == "none"
+    assert "步数上限" in final["messages"][-1]["content"]
     assert _of(events, "done")[0]["content"] == "基于已有信息的回答"
+
+
+def test_final_round_ignores_tool_calls(user, monkeypatch):
+    """推理服务不支持 tool_choice=none 时模型可能仍要调用工具：不再执行，用已写出的文字作答。"""
+    from backend.assistant import agent
+
+    monkeypatch.setattr(agent, "AGENT_MAX_STEPS", 1)
+    provider = ScriptedProvider([
+        LLMResponse(tool_calls=[ToolCall("a", "list_tables", {})]),
+        LLMResponse(text="目前只能确认有这些表", tool_calls=[ToolCall("b", "run_sql", {"sql": "SELECT 1"})]),
+    ])
+    set_provider(provider)
+    _, events = _run(user, "查一下")
+    assert len(_of(events, "tool_call")) == 1
+    assert _of(events, "done")[0]["content"] == "目前只能确认有这些表"
+
+
+def test_stop_keeps_partial_answer(user):
+    """用户点「停止」：已经生成的文字保存下来并标注，后续工具不再执行。"""
+    import threading
+
+    from backend.assistant import sessions
+    from backend.assistant.agent import run_turn
+
+    cancel = threading.Event()
+
+    class Streaming(ScriptedProvider):
+        def stream_chat(self, system, messages, tools=None, max_tokens=None, temperature=0.2, thinking=False,
+                        tool_choice=None):
+            for piece in ["各门店", "销售额", "分别是"]:
+                yield "text", piece
+                if piece == "销售额":
+                    cancel.set()  # 模拟用户在生成过程中点了停止
+            return LLMResponse(text="不应到达")
+
+    set_provider(Streaming([]))
+    sid = sessions.create_session(user["id"])["id"]
+    events = list(run_turn(user, sid, "各门店销售额？", cancel=cancel))
+    done = _of(events, "done")[0]
+    assert done["content"].startswith("各门店销售额") and "已停止生成" in done["content"]
+    assert done["usage"]["stopped"] is True
+    assert sessions.get_messages(sid)[-1]["content"] == done["content"]
+
+
+def test_stop_before_tools_run(user):
+    import threading
+
+    from backend.assistant import sessions
+    from backend.assistant.agent import run_turn
+
+    cancel = threading.Event()
+
+    def plan(call):
+        cancel.set()
+        return LLMResponse(tool_calls=[ToolCall("t1", "list_tables", {})])
+
+    set_provider(ScriptedProvider([plan]))
+    sid = sessions.create_session(user["id"])["id"]
+    events = list(run_turn(user, sid, "查表", cancel=cancel))
+    assert not _of(events, "tool_result")
+    assert "已停止生成" in _of(events, "done")[0]["content"]
+
+
+def test_citations_limited_to_readable_spaces(user, make_user, client):
+    """别人个人空间里的页面即使存在，也不能作为有效引用。"""
+    from backend.assistant.agent import _verify_references
+    from backend.kb.spaces import readable_spaces
+
+    other = make_user("viewer")
+    other_space = client.get("/api/kb/spaces", headers=other).json()["items"]
+    personal = next(s for s in other_space if s["kind"] == "personal")
+    slug = f"private-{uuid.uuid4().hex[:6]}"
+    resp = client.post("/api/wiki/pages", headers=other,
+                       json={"title": slug, "slug": slug, "content_md": "私人笔记", "space_id": personal["id"]})
+    assert resp.status_code in (200, 201), resp.text
+    real_slug = resp.json()["slug"]
+    text_in = f"结论 [[{real_slug}]]"
+    assert _verify_references(text_in, [], None) == text_in  # 不限空间时存在即有效
+    assert _verify_references(text_in, [], readable_spaces(user["id"])) == "结论"
 
 
 def test_rule_fallback_without_llm(user):

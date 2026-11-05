@@ -92,7 +92,7 @@ function Turn({ turn, innerRef, onOpenPage, pack }) {
 }
 
 export default function ChatView({
-  pack, turns, loading, mode, onModeChange, targetTable, onClearTable, onOpenData, onAsk, onOpenPage,
+  pack, turns, loading, mode, onModeChange, targetTable, onClearTable, onOpenData, onAsk, onStop, onOpenPage,
   models, modelId, onModelChange, skills, skill, onSkillChange,
 }) {
   const lastTurnRef = useRef(null);
@@ -107,6 +107,7 @@ export default function ChatView({
   const composer = (
     <Composer
       onSubmit={(q) => onAsk(q)}
+      onStop={onStop}
       loading={loading}
       mode={mode}
       onModeChange={onModeChange}

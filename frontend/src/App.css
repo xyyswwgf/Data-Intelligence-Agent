@@ -729,6 +729,18 @@ code {
   opacity: 0.9;
 }
 
+.send-btn.is-stop {
+  background: var(--text, #1f2335);
+  box-shadow: none;
+}
+
+.stop-square {
+  width: 12px;
+  height: 12px;
+  border-radius: 3px;
+  background: #fff;
+}
+
 .send-spinner {
   width: 16px;
   height: 16px;

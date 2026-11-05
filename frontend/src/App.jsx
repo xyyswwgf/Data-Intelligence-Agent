@@ -21,6 +21,7 @@ import {
   getToken,
   listChatSessions,
   logout,
+  stopChatMessage,
   streamChatMessage,
   apiClient,
 } from "./api";
@@ -57,7 +58,7 @@ function useHashRoute() {
 }
 
 /** 把持久化的会话消息还原成界面上的「轮次」，刷新页面后推理过程也能完整回看 */
-function messagesToTurns(messages) {
+function messagesToTurns(messages, running = false) {
   const turns = [];
   for (const msg of messages) {
     if (msg.role === "user") {
@@ -77,8 +78,11 @@ function messagesToTurns(messages) {
       turn.result = payload.result;
     }
   }
-  // 最后一条用户消息没有回复（例如上次请求中断）
-  return turns.map((t) => (t.status === "pending" ? { ...t, status: "error", error: "这条消息没有完成，请重新提问。" } : t));
+  // 最后一条用户消息没有回复：后台仍在运行（刷新了页面）时保持「进行中」，否则是上次请求中断
+  return turns.map((t, i) => {
+    if (t.status !== "pending" || (running && i === turns.length - 1)) return t;
+    return { ...t, status: "error", error: "这条消息没有完成，请重新提问。" };
+  });
 }
 
 // 只用于记住个人偏好；隐私模式下读写失败不影响使用
@@ -138,6 +142,7 @@ function App() {
   };
   // 正在流式写入的会话：路由切到它时不要用服务端数据覆盖本地的实时轮次
   const streamingSessionRef = useRef(null);
+  const [backgroundSessionId, setBackgroundSessionId] = useState(null);
 
   const loading = turns.some((t) => t.status === "pending");
 
@@ -223,8 +228,9 @@ function App() {
     getChatSession(routeSessionId)
       .then((data) => {
         if (cancelled) return;
-        setTurns(messagesToTurns(data.messages));
+        setTurns(messagesToTurns(data.messages, data.running));
         setLoadedSessionId(routeSessionId);
+        setBackgroundSessionId(data.running ? routeSessionId : null);
         const lastTable = [...data.messages].reverse().find((m) => m.role === "user")?.payload?.table;
         setTargetTable(lastTable || null);
       })
@@ -235,6 +241,26 @@ function App() {
       cancelled = true;
     };
   }, [user, routeSessionId, loadedSessionId, navigate]);
+
+  // 刷新页面时上一轮还在后台运行：每 2 秒刷新一次，直到回答落库
+  useEffect(() => {
+    if (!backgroundSessionId) return;
+    if (backgroundSessionId !== routeSessionId) {
+      Promise.resolve().then(() => setBackgroundSessionId(null));
+      return;
+    }
+    const timer = setInterval(() => {
+      getChatSession(backgroundSessionId)
+        .then((data) => {
+          if (data.running) return;
+          setTurns(messagesToTurns(data.messages));
+          setBackgroundSessionId(null);
+          fetchAccount();
+        })
+        .catch(() => setBackgroundSessionId(null));
+    }, 2000);
+    return () => clearInterval(timer);
+  }, [backgroundSessionId, routeSessionId, fetchAccount]);
 
   const updateTurn = (id, patch) =>
     setTurns((prev) => prev.map((t) => (t.id === id ? { ...t, ...(typeof patch === "function" ? patch(t) : patch) } : t)));
@@ -295,6 +321,11 @@ function App() {
       fetchSessions();
       fetchAccount();
     }
+  };
+
+  const stopAnswer = () => {
+    const sid = streamingSessionRef.current || backgroundSessionId;
+    if (sid) stopChatMessage(sid).catch(() => {});
   };
 
   const handleNewChat = () => {
@@ -439,6 +470,7 @@ function App() {
             onClearTable={() => setTargetTable(null)}
             onOpenData={() => setDrawerOpen(true)}
             onAsk={ask}
+            onStop={stopAnswer}
             onOpenPage={(slug) => navigate(`/wiki/${encodeURIComponent(slug)}`)}
             models={models}
             modelId={modelId}
